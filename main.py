@@ -3,10 +3,10 @@ import re
 import asyncio
 from flask import Flask, render_template
 from threading import Thread
-import nextcord
-from nextcord.ext import commands
-from nextcord.ext import tasks
-from nextcord import slash_command, SlashOption
+import disnake
+from disnake.ext import commands
+from disnake.ext import tasks
+from disnake import slash_command, SlashOption
 
 # Flask app for keeping the bot alive
 app = Flask('')
@@ -23,7 +23,7 @@ def keep_alive():
     t.start()
 
 # Bot setup
-intents = nextcord.Intents.default()
+intents = disnake.Intents.default()
 intents.message_content = True
 intents.members = True  # Enable members intent for member events
 intents.guilds = True
@@ -53,6 +53,9 @@ afk_data = {}
 # Footer image URL
 FOOTER_IMAGE_URL = "https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ab6798&is=69aa1618&hm=1d2252bf2f7eb6cfb39919584fada1db4f56e73a4721967df64e6dd509b38224&"
 
+# Embed color
+EMBED_COLOR = 0x004bae
+
 def has_say_permission(member):
     """Check if member has any of the allowed roles for say command"""
     if not member:
@@ -71,16 +74,39 @@ def has_afk_permission(member):
             return True
     return False
 
-def create_afk_permission_denied_embed():
-    """Create embed for when user doesn't have permission for AFK"""
-    embed1 = nextcord.Embed(
-        title="<@&1478894384597700669> | 𝓛𝓐𝓡𝓟 Services",
-        description="You must be Internal Affairs+ to use the functionality of AFK.",
-        color=0x004bae
+def create_embed_container(title=None, description=None, fields=None, image_url=None, thumbnail_url=None):
+    """Create a styled embed container similar to Discohook v2"""
+    embed = disnake.Embed(
+        title=title,
+        description=description,
+        color=EMBED_COLOR
     )
-    embed2 = nextcord.Embed()
-    embed2.color = 0x004bae
-    embed2.set_image(url=FOOTER_IMAGE_URL)
+    
+    if fields:
+        for name, value, inline in fields:
+            embed.add_field(name=name, value=value, inline=inline)
+    
+    if image_url:
+        embed.set_image(url=image_url)
+    
+    if thumbnail_url:
+        embed.set_thumbnail(url=thumbnail_url)
+    
+    return embed
+
+def create_footer_container(embed):
+    """Add footer image to an embed container"""
+    embed.set_image(url=FOOTER_IMAGE_URL)
+    return embed
+
+def create_afk_permission_denied_embed():
+    """Create embed container for when user doesn't have permission for AFK"""
+    embed1 = create_embed_container(
+        title="<@&1478894384597700669> | 𝓛𝓐𝓡𝓟 Services",
+        description="You must be Internal Affairs+ to use the functionality of AFK."
+    )
+    embed2 = create_embed_container()
+    embed2 = create_footer_container(embed2)
     return [embed1, embed2]
 
 def format_afk_time(seconds):
@@ -148,29 +174,28 @@ def parse_time(time_str):
     return None
 
 def create_permission_denied_embed():
-    """Create embed for when user doesn't have permission"""
-    embed1 = nextcord.Embed(
-        title="<@&1478894384597700669> | 𝓛𝓐𝓡𝓟 Services",
-        description="You must be Chief of Staff+ in Los Angeles Roleplay in order to use the bot functionality of say",
-        color=0x004bae
+    """Create embed container for when user doesn't have permission"""
+    embed1 = create_embed_container(
+        title="<@&1478894384597700669> | 𝓛𝓐𝓟 Services",
+        description="You must be Chief of Staff+ in Los Angeles Roleplay in order to use the bot functionality of say"
     )
-    embed2 = nextcord.Embed()
-    embed2.color = 0x004bae
-    embed2.set_image(url=FOOTER_IMAGE_URL)
+    embed2 = create_embed_container()
+    embed2 = create_footer_container(embed2)
     return [embed1, embed2]
 
 # Set bot activity and name
 @bot.event
 async def on_ready():
-    await bot.change_presence(activity=nextcord.Activity(type=nextcord.ActivityType.playing, name="Los Angeles Roleplay"))
+    await bot.change_presence(activity=disnake.Activity(type=disnake.ActivityType.playing, name="Los Angeles Roleplay"))
     print(f'Bot is logged in as {bot.user.name}')
     # Start the member count updater task
     update_member_count.start()
-    # Sync slash commands
-    bot.add_view(SlashCommandSyncView())
-    # Sync application commands with Discord
-    await bot.sync_application_commands()
-    print("Slash commands synced!")
+    # Sync slash commands globally
+    try:
+        await bot.sync_application_commands()
+        print("Slash commands synced globally!")
+    except Exception as e:
+        print(f"Error syncing slash commands: {e}")
 
 # Task to update member count every 10 minutes
 @tasks.loop(minutes=10)
@@ -205,24 +230,21 @@ async def on_member_join(member):
             return
         
         # Create Image Embed 1 - show as actual image, not hyperlink
-        embed1 = nextcord.Embed()
-        embed1.color = 0x004bae  # Sidebar color: 004bae
+        embed1 = create_embed_container()
         embed1.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479260063192584273/welcomelarp.png?ex=69ab63ca&is=69aa124a&hm=3c0da986deb94716651023791e37aa7998f5c98cd162ed8c5e4999993bcfc7a5&")
         
         # Create Text Embed 2
-        embed2 = nextcord.Embed(
+        embed2 = create_embed_container(
             title="<:Offical_server:1475860128686411837> __Los Angeles Roleplay - New Member__",
-            color=0x004bae  # Sidebar color: 004bae
+            description=f"Welcome to Los Angeles Roleplay, {member.mention}!\n\n"
+                "> To learn more about our community, check out <#1464682633371062296>.\n"
+                "> In need of assistance? Create a ticket in <#1464682633371062300>.\n"
+                "> Ensure you are properly verified within <#1464682633371062294>."
         )
-        embed2.description = f"Welcome to Los Angeles Roleplay, {member.mention}!\n\n" \
-            "> To learn more about our community, check out <#1464682633371062296>.\n" \
-            "> In need of assistance? Create a ticket in <#1464682633371062300>.\n" \
-            "> Ensure you are properly verified within <#1464682633371062294>.\n"
         
         # Create Image Embed 3 (footer image)
-        embed3 = nextcord.Embed()
-        embed3.color = 0x004bae  # Sidebar color: 004bae
-        embed3.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ab6798&is=69aa1618&hm=1d2252bf2f7eb6cfb39919584fada1db4f56e73a4721967df64e6dd509b38224&")
+        embed3 = create_embed_container()
+        embed3 = create_footer_container(embed3)
         
         # Send the embeds
         await channel.send(content=member.mention, embeds=[embed1, embed2, embed3])
@@ -267,18 +289,16 @@ async def on_message(message):
             bot_nickname = bot_member.nick if bot_member and bot_member.nick else bot_member.name if bot_member else "Los Angeles Roleplay"
             
             # Create Text Embed 1
-            embed1 = nextcord.Embed(
+            embed1 = create_embed_container(
                 title=f"**{bot_nickname}**",
-                color=0x004bae  # Sidebar color: 004bae
+                description=f"> Thanks for mention <@{BOT_USER_ID}>: Our Community Services bot.\n"
+                    f"> `Prefix:` <\n"
+                    f"> Developed by <@{DEVELOPER_USER_ID}>"
             )
-            embed1.description = f"> Thanks for mention <@{BOT_USER_ID}>: Our Community Services bot.\n" \
-                f"> `Prefix:` <\n" \
-                f"> Developed by <@{DEVELOPER_USER_ID}>"
             
             # Create Image Embed 2 (footer image)
-            embed2 = nextcord.Embed()
-            embed2.color = 0x004bae  # Sidebar color: 004bae
-            embed2.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ab6798&is=69aa1618&hm=1d2252bf2f7eb6cfb39919584fada1db4f56e73a4721967df64e6dd509b38224&")
+            embed2 = create_embed_container()
+            embed2 = create_footer_container(embed2)
             
             # Reply to the user and delete after 15 seconds
             reply_message = await message.reply(embeds=[embed1, embed2])
@@ -328,14 +348,9 @@ async def on_message(message):
     # Process commands (if any)
     await bot.process_commands(message)
 
-# Slash command view for syncing
-class SlashCommandSyncView(nextcord.ui.View):
-    def __init__(self):
-        super().__init__()
-
 # /sync slash command - Manually sync all slash commands
-@bot.slash_command(description="Sync all slash commands with Discord", guild_ids=[GUILD_ID])
-async def sync(interaction: nextcord.Interaction):
+@bot.slash_command(description="Sync all slash commands with Discord")
+async def sync(interaction: disnake.Interaction):
     """Sync all slash commands with Discord"""
     try:
         # Check if user has permission (must be bot developer or admin)
@@ -343,17 +358,18 @@ async def sync(interaction: nextcord.Interaction):
             await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
             return
         
+        # Sync globally
         await bot.sync_application_commands()
-        await interaction.response.send_message("✅ All slash commands have been synced!", ephemeral=True)
+        await interaction.response.send_message("✅ All slash commands have been synced globally!", ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f"❌ Error syncing commands: {e}", ephemeral=True)
 
 # /say slash command
-@bot.slash_command(description="Send a message to a specified channel with optional delay", guild_ids=[GUILD_ID])
+@bot.slash_command(description="Send a message to a specified channel with optional delay")
 async def say(
-    interaction: nextcord.Interaction,
+    interaction: disnake.Interaction,
     text: str = SlashOption(description="The text to send", required=True),
-    channel: nextcord.TextChannel = SlashOption(
+    channel: disnake.TextChannel = SlashOption(
         description="The channel to send to (defaults to current channel)",
         required=False
     ),
@@ -474,18 +490,16 @@ async def set_afk_status(ctx, member, reason, time_str=None):
         except:
             pass
     
-    # Create the response embed
-    embed1 = nextcord.Embed(
-        color=0x004bae
+    # Create the response embed container
+    embed1 = create_embed_container(
+        description=f"**{member.nick if member.nick else member.name}**\n"
+            f"> You are now away from your keyboard [AFK] for {reason}.\n"
+            f"> Members will be notified about your status.\n"
+            f"> When you are back to your keyboard, you will be shown all the people who mentioned you while you were AFK."
     )
-    embed1.description = f"**{member.nick if member.nick else member.name}**\n" \
-        f"> You are now away from your keyboard [AFK] for {reason}.\n" \
-        f"> Members will be notified about your status.\n" \
-        f"> When you are back to your keyboard, you will be shown all the people who mentioned you while you were AFK."
     
-    embed2 = nextcord.Embed()
-    embed2.color = 0x004bae
-    embed2.set_image(url=FOOTER_IMAGE_URL)
+    embed2 = create_embed_container()
+    embed2 = create_footer_container(embed2)
     
     await ctx.send(embeds=[embed1, embed2])
     
@@ -545,16 +559,11 @@ async def handle_afk_return(ctx, member):
             mentioner_name = mention_info["name"]
             description += f"> `{mentioner_name}`\n> \"How are you doing?\"\n> {afk_time_str} at <t:{int(start_time)}:t>\n\n"
     else:
-        description += f"> Here is the\n> No one has mentioned you while you were AFK."
+        description += f"> No one has mentioned you while you were AFK."
     
-    embed1 = nextcord.Embed(
-        color=0x004bae
-    )
-    embed1.description = description
-    
-    embed2 = nextcord.Embed()
-    embed2.color = 0x004bae
-    embed2.set_image(url=FOOTER_IMAGE_URL)
+    embed1 = create_embed_container(description=description)
+    embed2 = create_embed_container()
+    embed2 = create_footer_container(embed2)
     
     await ctx.reply(embeds=[embed1, embed2], content=member.mention)
     
@@ -562,9 +571,9 @@ async def handle_afk_return(ctx, member):
     del afk_data[member.id]
 
 # /afk slash command
-@bot.slash_command(description="Set your AFK status", guild_ids=[GUILD_ID])
+@bot.slash_command(description="Set your AFK status")
 async def afk(
-    interaction: nextcord.Interaction,
+    interaction: disnake.Interaction,
     reason: str = SlashOption(description="Reason for being AFK", required=False),
     time: str = SlashOption(description="Time until auto-return (e.g., 15s, 1d, 15min, 1hr)", required=False)
 ):
@@ -622,18 +631,16 @@ async def set_afk_status_slash(interaction, member, reason, time_str=None):
         print(f"Error updating nickname: {e}")
         nickname_error = "Unable to update your nickname with AFK status. You are still AFK on status."
     
-    # Create the response embed
-    embed1 = nextcord.Embed(
-        color=0x004bae
+    # Create the response embed container
+    embed1 = create_embed_container(
+        description=f"**{member.nick if member.nick else member.name}**\n"
+            f"> You are now away from your keyboard [AFK] for {reason if reason else 'AFK'}.\n"
+            f"> Members will be notified about your status.\n"
+            f"> When you are back to your keyboard, you will be shown all the people who mentioned you while you were AFK."
     )
-    embed1.description = f"**{member.nick if member.nick else member.name}**\n" \
-        f"> You are now away from your keyboard [AFK] for {reason if reason else 'AFK'}.\n" \
-        f"> Members will be notified about your status.\n" \
-        f"> When you are back to your keyboard, you will be shown all the people who mentioned you while you were AFK."
     
-    embed2 = nextcord.Embed()
-    embed2.color = 0x004bae
-    embed2.set_image(url=FOOTER_IMAGE_URL)
+    embed2 = create_embed_container()
+    embed2 = create_footer_container(embed2)
     
     await interaction.response.send_message(embeds=[embed1, embed2])
     
