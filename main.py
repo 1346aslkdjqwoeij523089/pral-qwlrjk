@@ -1,9 +1,11 @@
 import os
+import re
 from flask import Flask, render_template
 from threading import Thread
 import nextcord
 from nextcord.ext import commands
 from nextcord.ext import tasks
+from nextcord import slash_command, SlashOption
 
 # Flask app for keeping the bot alive
 app = Flask('')
@@ -32,6 +34,64 @@ MEMBER_COUNT_CHANNEL_ID = 1471478613038600328
 WELCOME_CHANNEL_ID = 1464682633371062293
 BOT_USER_ID = 1478894384597700669
 DEVELOPER_USER_ID = 1261535675472281724
+GUILD_ID = 1464682632204779602  # Server ID to count members from
+
+# Role IDs for say command access
+ALLOWED_ROLE_IDS = [
+    1479003906531917886,  # Bot developer
+    1466490625259212821,  # 𝓛𝓐𝓡𝓟 | Executive Council
+    1464682632754233539  # ⭐️ | Foundation Team
+]
+
+# Footer image URL
+FOOTER_IMAGE_URL = "https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ab6798&is=69aa1618&hm=1d2252bf2f7eb6cfb39919584fada1db4f56e73a4721967df64e6dd509b38224&"
+
+def has_say_permission(member):
+    """Check if member has any of the allowed roles"""
+    if not member:
+        return False
+    for role in member.roles:
+        if role.id in ALLOWED_ROLE_IDS:
+            return True
+    return False
+
+def parse_time(time_str):
+    """Parse time string like 15s, 1d, 15min, 1hr etc. Returns seconds or None"""
+    if not time_str:
+        return None
+    
+    time_str = time_str.lower().strip()
+    
+    # Patterns for different time formats
+    patterns = [
+        (r'^(\d+)s$', 1),           # 15s
+        (r'^(\d+)sec$', 1),         # 15sec
+        (r'^(\d+)m$', 60),          # 15m
+        (r'^(\d+)min$', 60),        # 15min
+        (r'^(\d+)h$', 3600),       # 15h
+        (r'^(\d+)hr$', 3600),      # 15hr
+        (r'^(\d+)d$', 86400),      # 1d
+        (r'^(\d+)day$', 86400),    # 1day
+    ]
+    
+    for pattern, multiplier in patterns:
+        match = re.match(pattern, time_str)
+        if match:
+            return int(match.group(1)) * multiplier
+    
+    return None
+
+def create_permission_denied_embed():
+    """Create embed for when user doesn't have permission"""
+    embed1 = nextcord.Embed(
+        title="<@&1478894384597700669> | 𝓛𝓐𝓡𝓟 Services",
+        description="You must be Chief of Staff+ in Los Angeles Roleplay in order to use the bot functionality of say",
+        color=0x004bae
+    )
+    embed2 = nextcord.Embed()
+    embed2.color = 0x004bae
+    embed2.set_image(url=FOOTER_IMAGE_URL)
+    return [embed1, embed2]
 
 # Set bot activity and name
 @bot.event
@@ -45,8 +105,9 @@ async def on_ready():
 @tasks.loop(minutes=10)
 async def update_member_count():
     try:
-        # Get the guild (assuming bot is in one server, or find by ID)
-        for guild in bot.guilds:
+        # Get the specific guild by ID
+        guild = bot.get_guild(GUILD_ID)
+        if guild:
             # Count members excluding bots
             member_count = len([member for member in guild.members if not member.bot])
             
@@ -72,9 +133,8 @@ async def on_member_join(member):
             print(f"Welcome channel {WELCOME_CHANNEL_ID} not found")
             return
         
-        # Create Image Embed 1 (link embed with welcome image)
+        # Create Image Embed 1 - show as actual image, not hyperlink
         embed1 = nextcord.Embed()
-        embed1.description = f"[Welcomelarp](https://cdn.discordapp.com/attachments/1479259996846948403/1479260063192584273/welcomelarp.png?ex=69ab63ca&is=69aa124a&hm=3c0da986deb94716651023791e37aa7998f5c98cd162ed8c5e4999993bcfc7a5&)"
         embed1.color = 0x004bae  # Sidebar color: 004bae
         embed1.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479260063192584273/welcomelarp.png?ex=69ab63ca&is=69aa124a&hm=3c0da986deb94716651023791e37aa7998f5c98cd162ed8c5e4999993bcfc7a5&")
         
@@ -106,6 +166,28 @@ async def on_message(message):
     if message.author.bot:
         return
     
+    # Check for <say command
+    if message.content.startswith("<say "):
+        # Check permission
+        if not has_say_permission(message.author):
+            reply_msg = await message.reply(embeds=create_permission_denied_embed())
+            await message.delete()
+            await reply_msg.delete(delay=15)
+            return
+        
+        # Extract the text to say (everything after <say )
+        say_text = message.content[5:].strip()  # Remove "<say " prefix
+        
+        if not say_text:
+            return
+        
+        # Delete user's message
+        await message.delete()
+        
+        # Send the message in the same channel
+        bot_message = await message.channel.send(say_text)
+        return
+    
     # Check if the bot is mentioned in the message
     if BOT_USER_ID in [mention.id for mention in message.mentions]:
         try:
@@ -127,14 +209,56 @@ async def on_message(message):
             embed2.color = 0x004bae  # Sidebar color: 004bae
             embed2.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ab6798&is=69aa1618&hm=1d2252bf2f7eb6cfb39919584fada1db4f56e73a4721967df64e6dd509b38224&")
             
-            # Reply to the user
-            await message.reply(embeds=[embed1, embed2])
+            # Reply to the user and delete after 15 seconds
+            reply_message = await message.reply(embeds=[embed1, embed2])
+            await reply_message.delete(delay=15)
             
         except Exception as e:
             print(f"Error responding to bot mention: {e}")
     
     # Process commands (if any)
     await bot.process_commands(message)
+
+# /say slash command
+@slash_command(description="Send a message to a specified channel with optional delay")
+async def say(
+    interaction: nextcord.Interaction,
+    text: str = SlashOption(description="The text to send", required=True),
+    channel: nextcord.TextChannel = SlashOption(
+        description="The channel to send to (defaults to current channel)",
+        required=False
+    ),
+    time: str = SlashOption(
+        description="Delay before sending (e.g., 15s, 1d, 15min, 1hr)",
+        required=False
+    )
+):
+    # Check permission
+    if not has_say_permission(interaction.user):
+        await interaction.response.send_message(embeds=create_permission_denied_embed(), ephemeral=True)
+        return
+    
+    # Use current channel if none specified
+    target_channel = channel if channel else interaction.channel
+    
+    # Parse time delay
+    delay_seconds = parse_time(time)
+    
+    if delay_seconds:
+        # Send with delay
+        await interaction.response.send_message(f"Message will be sent in {target_channel.mention} in {time}", ephemeral=True)
+        
+        async def delayed_send():
+            await target_channel.send(text)
+        
+        # Schedule the delayed message
+        bot.loop.call_later(delay_seconds, lambda: asyncio.ensure_future(delayed_send()))
+    else:
+        # Send immediately
+        await target_channel.send(text)
+        await interaction.response.send_message(f"Message sent to {target_channel.mention}", ephemeral=True)
+
+import asyncio
 
 # Example command
 @bot.command()
