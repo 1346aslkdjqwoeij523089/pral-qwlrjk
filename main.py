@@ -961,6 +961,10 @@ async def prefix_sessions(ctx):
 
 # Run the bot
 if __name__ == "__main__":
+    # Load environment variables from .env file if it exists
+    from dotenv import load_dotenv
+    load_dotenv()
+    
     # Keep Flask running
     keep_alive()
     
@@ -974,6 +978,7 @@ if __name__ == "__main__":
         bot.run(token)
     else:
         # Keep Flask running anyway
+        import time
         while True:
-            asyncio.sleep(1)
+            time.sleep(1)
 
