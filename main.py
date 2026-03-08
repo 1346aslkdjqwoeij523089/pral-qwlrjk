@@ -462,8 +462,7 @@ async def ban_command(interaction: discord.Interaction, member: discord.Member, 
     except Exception as e:
         await interaction.response.send_message(f"Failed to ban: {e}", ephemeral=True)
 
-@tree.command(name="timeout", description="Timeout a member", guild=discord.Object(id=GUILD_ID))
-@tree.command(name="mute", description="Mute a member", guild=discord.Object(id=GUILD_ID))
+@tree.command(name="timeout", description="Timeout/Mute a member", guild=discord.Object(id=GUILD_ID))
 @check_staff()
 async def timeout_command(interaction: discord.Interaction, member: discord.Member, duration: int, *, reason: str):
     """Timeout/Mute a member"""
