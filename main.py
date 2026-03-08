@@ -462,6 +462,7 @@ async def ban_command(interaction: discord.Interaction, member: discord.Member, 
         await interaction.response.send_message(f"Failed to ban: {e}", ephemeral=True)
 
 @tree.command(name="timeout", description="Timeout/Mute a member", guild=discord.Object(id=GUILD_ID))
+@tree.command(name="mute", description="Mute a member", guild=discord.Object(id=GUILD_ID))
 @check_staff()
 async def timeout_command(interaction: discord.Interaction, member: discord.Member, duration: int, *, reason: str):
     """Timeout/Mute a member"""
@@ -953,7 +954,6 @@ async def prefix_ban(ctx, member: discord.Member, *, reason):
     await ctx.invoke(ban_command, member=member, reason=reason)
 
 @bot.command(name="timeout")
-@bot.command(name="mute")
 async def prefix_timeout(ctx, member: discord.Member, duration: int, *, reason):
     """Timeout a member via prefix"""
     await ctx.invoke(timeout_command, member=member, duration=duration, reason=reason)
