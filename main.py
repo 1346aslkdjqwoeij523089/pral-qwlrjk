@@ -75,7 +75,9 @@ intents.message_content = True
 
 # Bot setup
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents, help_command=None)
-tree = app_commands.CommandTree(bot)
+
+# Use bot.tree directly instead of creating a new CommandTree
+tree = bot.tree
 
 # Global data storage
 session_data = {
