@@ -220,7 +220,8 @@ async def on_ready():
     
     # Start tasks
     update_member_count.start()
-    
+    session_reminder_task.start()
+
     # Set initial session status
     await update_session_status()
 
@@ -919,9 +920,6 @@ async def on_interaction(interaction: discord.Interaction):
         if guild:
             await shutdown_session(interaction.user, guild)
         await interaction.response.send_message("Session has been shutdown.", ephemeral=True)
-
-# Start reminder task
-session_reminder_task.start()
 
 # Regular commands (for prefix compatibility)
 @bot.command(name="afk")
