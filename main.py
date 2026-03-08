@@ -26,7 +26,8 @@ def home():
     return "Bot is running!"
 
 def run_flask():
-    app.run(host='0.0.0.0', port=8080)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 # Run Flask in background
 flask_thread = Thread(target=run_flask, daemon=True)
@@ -185,9 +186,6 @@ def keep_alive():
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
-
-def run_flask():
-    app.run(host='0.0.0.0', port=8080)
 
 # Tasks
 @tasks.loop(minutes=15)
