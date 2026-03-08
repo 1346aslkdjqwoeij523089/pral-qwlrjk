@@ -961,24 +961,48 @@ async def prefix_sessions(ctx):
 
 # Run the bot
 if __name__ == "__main__":
-    # Load environment variables from .env file if it exists
-    from dotenv import load_dotenv
-    load_dotenv()
-    
-    # Keep Flask running
-    keep_alive()
-    
-    # Get token from environment
-    token = os.environ.get("DISCORD_TOKEN", "")
-    if not token:
-        logger.warning("No Discord token found. Please set DISCORD_TOKEN environment variable.")
-        logger.info("Bot will start but won't connect without a valid token.")
-    
-    if token:
-        bot.run(token)
-    else:
-        # Keep Flask running anyway
-        import time
-        while True:
-            time.sleep(1)
+    try:
+        # Load environment variables from .env file if it exists
+        from dotenv import load_dotenv
+        load_dotenv()
+        
+        # Keep Flask running
+        keep_alive()
+        
+        # Get token from environment
+        token = os.environ.get("DISCORD_TOKEN", "")
+        if not token:
+            logger.warning("No Discord token found. Please set DISCORD_TOKEN environment variable.")
+            logger.info("Bot will start but won't connect without a valid token.")
+        
+        if token:
+            import time
+            max_retries = 5
+            retry_delay = 10  # seconds
+            
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Attempting to connect to Discord (attempt {attempt + 1}/{max_retries})...")
+                    bot.run(token)
+                    break
+                except Exception as e:
+                    error_str = str(e)
+                    if "429" in error_str or "Too Many Requests" in error_str or "rate limit" in error_str.lower():
+                        logger.warning(f"Rate limited by Discord. Waiting {retry_delay} seconds before retry...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        logger.error(f"Error connecting to Discord: {e}")
+                        raise
+            else:
+                logger.error("Max retries exceeded. Bot could not connect.")
+        else:
+            # Keep Flask running anyway
+            import time
+            while True:
+                time.sleep(1)
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
