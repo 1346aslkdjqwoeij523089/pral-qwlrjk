@@ -27,11 +27,7 @@ def home():
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# Run Flask in background
-flask_thread = Thread(target=run_flask, daemon=True)
-flask_thread.start()
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 # Bot Configuration
 GUILD_ID = 1464682632204779602
@@ -71,6 +67,7 @@ VOTE_EMOJI = "✅"
 
 # Intents
 intents = discord.Intents.default()
+intents.guilds = True
 intents.members = True
 intents.message_content = True
 
@@ -183,9 +180,9 @@ def log_to_channel(guild, action: str, details: str, user: discord.Member = None
 
 # Flask health check
 def keep_alive():
-    t = Thread(target=run_flask)
-    t.daemon = True
-    t.start()
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("Flask web server started on port " + os.environ.get("PORT", "8080"))
 
 # Tasks
 @tasks.loop(minutes=15)
