@@ -48,7 +48,8 @@ ROLES = {
     "ADMINISTRATION": 1464682632661958852,
     "MODERATION": 1464682632645185848,
     "STAFF": 1464682632645185843,
-    "BOT_DEV": 1479003906531917886
+    "BOT_DEV": 1479003906531917886,
+    "SESSION_PING": 1465771610312278180  # Role ID for pinging session notifications
 }
 
 # Channel IDs
@@ -59,8 +60,7 @@ CHANNELS = {
     "SESSION_INFO": 1480024519677706382,
     "SESSION_VC_STATUS": 1480013219199451308,
     "STAFF_CHAT": 1464682633853407327,
-    "LOG_CHANNEL": 1480026203443171338,
-    "SESSION_PING": 1465771610312278180
+    "LOG_CHANNEL": 1480026203443171338
 }
 
 # ER:LC Role
@@ -462,7 +462,6 @@ async def ban_command(interaction: discord.Interaction, member: discord.Member, 
         await interaction.response.send_message(f"Failed to ban: {e}", ephemeral=True)
 
 @tree.command(name="timeout", description="Timeout/Mute a member", guild=discord.Object(id=GUILD_ID))
-@tree.command(name="mute", description="Mute a member", guild=discord.Object(id=GUILD_ID))
 @check_staff()
 async def timeout_command(interaction: discord.Interaction, member: discord.Member, duration: int, *, reason: str):
     """Timeout/Mute a member"""
@@ -655,7 +654,7 @@ class VoteThresholdModal(discord.ui.Modal):
             # Notify in staff chat
             staff_channel = guild.get_channel(CHANNELS["STAFF_CHAT"])
             if staff_channel:
-                session_ping = guild.get_role(CHANNELS["SESSION_PING"])
+                session_ping = guild.get_role(ROLES["SESSION_PING"])
                 await staff_channel.send(f"{interaction.user.mention}: The Session Vote has received `0/{VOTE_EMOJI}. Would you like to begin the session?")
             
             await interaction.response.send_message("Session vote started!", ephemeral=True)
@@ -809,7 +808,7 @@ async def on_raw_reaction_add(payload):
         # Notify in staff chat
         staff_channel = guild.get_channel(CHANNELS["STAFF_CHAT"])
         if staff_channel:
-            session_ping = guild.get_role(CHANNELS["SESSION_PING"])
+            session_ping = guild.get_role(ROLES["SESSION_PING"])
             await staff_channel.send(f"{starter.mention if starter else ''}: The Session Vote has received `{VOTE_EMOJI}/{threshold}. Would you like to begin the session?")
 
 @bot.event
