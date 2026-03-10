@@ -1,198 +1,233 @@
-import os
-import asyncio
-import logging
-from datetime import datetime, timedelta
-from typing import Optional
+"""
+Los Angeles Roleplay (LARP) Services Bot
+Discord Bot for LARP Server Management
+"""
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-
-from flask import Flask
-from threading import Thread
-
-import requests
+import asyncio
+import os
 import json
+from datetime import datetime, timedelta
+from typing import Optional, Dict, List
+import logging
 
-# Configure logging
+# Setup logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger('discord')
+logger = logging.getLogger('LARPServices')
 
-# Flask app for keeping bot online
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot is running!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
-# Bot Configuration
+# ============== CONFIGURATION ==============
 GUILD_ID = 1464682632204779602
-SIDEBAR_COLOR = 0x004bae
 BOT_PREFIX = "<"
-
-# Staff Role IDs
-ROLES = {
-    "FOUNDATION": 1464682632754233539,
-    "EXECUTIVE_COUNCIL": 1466490625259212821,
-    "MANAGEMENT": 1464682632754233535,
-    "HIGH_RANKING": 1464682632729071818,
-    "INTERNAL_AFFAIRS": 1464682632661958858,
-    "ADMINISTRATION": 1464682632661958852,
-    "MODERATION": 1464682632645185848,
-    "STAFF": 1464682632645185843,
-    "BOT_DEV": 1479003906531917886,
-    "SESSION_PING": 1465771610312278180  # Role ID for pinging session notifications
-}
+SIDEBAR_COLOR = 0x004bae
 
 # Channel IDs
-CHANNELS = {
-    "WELCOME": 1464682633371062293,
-    "MEMBER_COUNT_VC": 1471478613038600328,
-    "SESSION_CHANNEL": 1464682633559801939,
-    "SESSION_INFO": 1480024519677706382,
-    "SESSION_VC_STATUS": 1480013219199451308,
-    "STAFF_CHAT": 1464682633853407327,
-    "LOG_CHANNEL": 1480026203443171338
-}
+WELCOME_CHANNEL = 1464682633371062293
+MEMBERCOUNT_VC = 1471478613038600328
+SESSION_CHANNEL = 1464682633559801939
+SESSION_STATUS_CHANNEL = 1480013219199451308
+SESSION_LOG_CHANNEL = 1480024519677706382
+STAFF_CHAT = 1464682633853407327
+SESSION_PING_ROLE = 1465771610312278180
+SESSION_START_MESSAGE = 1480023088799416451
 
-# ER:LC Role
-ERLC_STAFF_ROLE = 1465722596694818891
+# Role IDs
+ROLE_FOUNDATION = 1464682632754233539
+ROLE_EXECUTIVE = 1466490625259212821
+ROLE_MANAGEMENT = 1464682632754233535
+ROLE_HIGH_RANKING = 1464682632729071818
+ROLE_INTERNAL_AFFAIRS = 1464682632661958858
+ROLE_ADMINISTRATION = 1464682632661958852
+ROLE_MODERATION = 1464682632645185848
+ROLE_STAFF = 1464682632645185843
+ROLE_BOT_DEV = 1479003906531917886
 
-# Session vote emoji
-VOTE_EMOJI = "✅"
+# Session Settings
+SESSION_SHUTDOWN_COOLDOWN = 15  # minutes
+SESSION_CHECK_INTERVAL = 60  # minutes
 
-# Intents
+# ============== DATA FILES ==============
+DATA_DIR = "bot_data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
+AFK_FILE = os.path.join(DATA_DIR, "afk.json")
+SESSION_FILE = os.path.join(DATA_DIR, "session.json")
+DM_LOG_FILE = os.path.join(DATA_DIR, "dm_log.txt")
+SESSION_LOG_FILE = os.path.join(DATA_DIR, "session_log.txt")
+AFK_LOG_FILE = os.path.join(DATA_DIR, "afk_log.txt")
+
+# ============== HELPER FUNCTIONS ==============
+def load_json(filepath: str, default: dict = None) -> dict:
+    if default is None:
+        default = {}
+    try:
+        with open(filepath, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+
+def save_json(filepath: str, data: dict):
+    with open(filepath, 'w') as f:
+        json.dump(data, f, indent=4)
+
+def append_log(filepath: str, message: str):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(filepath, 'a') as f:
+        f.write(f"[{timestamp}] {message}\n")
+
+def get_color() -> discord.Color:
+    return discord.Color(SIDEBAR_COLOR)
+
+def has_role(member: discord.Member, role_id: int) -> bool:
+    return any(role.id == role_id for role in member.roles)
+
+def has_any_role(member: discord.Member, role_ids: List[int]) -> bool:
+    return any(has_role(member, rid) for rid in role_ids)
+
+def is_executive_plus(member: discord.Member) -> bool:
+    return has_any_role(member, [ROLE_EXECUTIVE, ROLE_BOT_DEV])
+
+def is_management_plus(member: discord.Member) -> bool:
+    return has_any_role(member, [ROLE_MANAGEMENT, ROLE_EXECUTIVE, ROLE_BOT_DEV])
+
+def is_foundation_plus(member: discord.Member) -> bool:
+    return has_any_role(member, [ROLE_FOUNDATION, ROLE_MANAGEMENT, ROLE_EXECUTIVE, ROLE_BOT_DEV])
+
+def is_staff(member: discord.Member) -> bool:
+    return has_any_role(member, [ROLE_STAFF, ROLE_MODERATION, ROLE_ADMINISTRATION, ROLE_INTERNAL_AFFAIRS, 
+                                  ROLE_HIGH_RANKING, ROLE_MANAGEMENT, ROLE_EXECUTIVE, ROLE_FOUNDATION, ROLE_BOT_DEV])
+
+# ============== BOT SETUP ==============
 intents = discord.Intents.default()
-intents.guilds = True
 intents.members = True
 intents.message_content = True
+intents.presences = True
 
-# Bot setup
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents, help_command=None)
+tree = app_commands.CommandTree(bot)
 
-# Use bot.tree directly instead of creating a new CommandTree
-tree = bot.tree
+# ============== GLOBAL VARIABLES ==============
+session_vote_message = None
+session_vote_channel = None
+session_active = False
+session_start_time = None
+session_starter_id = None
+vote_threshold = None
+vote_message_id = None
+session_check_task = None
 
-# Global data storage
-session_data = {
-    "active": False,
-    "started_at": None,
-    "started_by": None,
-    "vote_threshold": None,
-    "vote_message_id": None,
-    "session_message_id": None,
-    "last_reminder": None
-}
+# ============== COGS ==============
+class SessionCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        
+class AFKCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
 
-afk_data = {}
-mentions_while_afk = {}
-
-# Helper functions
-def get_color():
-    return SIDEBAR_COLOR
-
-def check_executive_plus():
-    async def predicate(interaction: discord.Interaction):
-        guild = interaction.guild
-        member = interaction.user
-        exec_role = guild.get_role(ROLES["EXECUTIVE_COUNCIL"])
-        bot_dev_role = guild.get_role(ROLES["BOT_DEV"])
-        return exec_role in member.roles or bot_dev_role in member.roles
-    return app_commands.check(predicate)
-
-def check_management_plus():
-    async def predicate(interaction: discord.Interaction):
-        guild = interaction.guild
-        member = interaction.user
-        management_role = guild.get_role(ROLES["MANAGEMENT"])
-        exec_role = guild.get_role(ROLES["EXECUTIVE_COUNCIL"])
-        bot_dev_role = guild.get_role(ROLES["BOT_DEV"])
-        return management_role in member.roles or exec_role in member.roles or bot_dev_role in member.roles
-    return app_commands.check(predicate)
-
-def check_foundation_plus():
-    async def predicate(interaction: discord.Interaction):
-        guild = interaction.guild
-        member = interaction.user
-        foundation_role = guild.get_role(ROLES["FOUNDATION"])
-        bot_dev_role = guild.get_role(ROLES["BOT_DEV"])
-        return foundation_role in member.roles or bot_dev_role in member.roles
-    return app_commands.check(predicate)
-
-def check_staff():
-    async def predicate(interaction: discord.Interaction):
-        guild = interaction.guild
-        member = interaction.user
-        staff_roles = [
-            ROLES["FOUNDATION"], ROLES["EXECUTIVE_COUNCIL"], 
-            ROLES["MANAGEMENT"], ROLES["HIGH_RANKING"],
-            ROLES["INTERNAL_AFFAIRS"], ROLES["ADMINISTRATION"],
-            ROLES["MODERATION"], ROLES["STAFF"], ROLES["BOT_DEV"]
-        ]
-        return any(role in member.roles for role in staff_roles)
-    return app_commands.check(predicate)
-
-def get_erlc_data():
-    """Get ER:LC server data from API"""
-    api_key = os.environ.get("ERLC_API_KEY", "")
-    if not api_key:
-        return {"players": 0, "max_players": 39, "server_code": "N/A"}
+# ============== EVENTS ==============
+@bot.event
+async def on_ready():
+    global guild
+    guild = bot.get_guild(GUILD_ID)
     
-    try:
-        # This is a placeholder - adjust based on actual ER:LC API
-        response = requests.get(
-            f"https://api.erlcenter.com/v1/server/status",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=5
-        )
-        if response.status_code == 200:
-            data = response.json()
-            return {
-                "players": data.get("player_count", 0),
-                "max_players": 39,
-                "server_code": data.get("server_code", "N/A")
-            }
-    except:
-        pass
+    # Sync slash commands
+    await tree.sync()
+    logger.info(f"Bot is ready as {bot.user}")
     
-    return {"players": 0, "max_players": 39, "server_code": "N/A"}
+    # Start background tasks
+    update_membercount.start()
+    check_session_status.start()
+    
+    # Load session data
+    load_session_data()
+    
+    # Send startup message to session log channel
+    session_log = bot.get_channel(SESSION_LOG_CHANNEL)
+    if session_log:
+        await session_log.send(embed=discord.Embed(
+            title="Bot Started",
+            description=f"LARP Services Bot has been restarted at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            color=get_color()
+        ))
 
-def log_to_channel(guild, action: str, details: str, user: discord.Member = None):
-    """Log actions to the log channel"""
-    log_channel = guild.get_channel(CHANNELS["LOG_CHANNEL"])
-    if not log_channel:
+@bot.event
+async def on_member_join(member):
+    if member.guild.id != GUILD_ID:
         return
     
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    embed = discord.Embed(
-        description=f"**{action}**\n{details}",
-        color=get_color()
-    )
-    embed.set_footer(text=f"{timestamp}")
-    if user:
-        embed.set_author(name=str(user), icon_url=user.display_avatar.url)
+    welcome_channel = bot.get_channel(WELCOME_CHANNEL)
+    if not welcome_channel:
+        return
     
-    asyncio.create_task(log_channel.send(embed=embed))
+    # Create welcome embed
+    embed = discord.Embed(color=get_color())
+    embed.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479260063192584273/welcomelarp.png?ex=69ae06ca&is=69acb54a&hm=e3cf31d81d9dee35659908000b6d6ad4c2cc9831e57c719cac8c7a6e8d7bfc85&")
+    
+    await welcome_channel.send(content=member.mention, embed=embed)
 
-# Flask health check
-def keep_alive():
-    flask_thread = Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("Flask web server started on port " + os.environ.get("PORT", "8080"))
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    
+    # Check for AFK system
+    afk_data = load_json(AFK_FILE)
+    user_id = str(message.author.id)
+    
+    if user_id in afk_data:
+        # User is back from AFK
+        afk_info = afk_data[user_id]
+        mentions = afk_info.get('mentions', [])
+        
+        # Remove AFK status
+        nickname = message.author.display_name
+        if nickname.startswith("AFK • "):
+            try:
+                await message.author.edit(nick=nickname[7:])
+            except:
+                pass
+        
+        # Show who mentioned them
+        if mentions:
+            mention_text = ", ".join([f"**{m['name']}**" for m in mentions])
+            embed = discord.Embed(
+                title=f"Welcome back, {message.author.display_name}!",
+                description=f"You were mentioned by {mention_text} while you were AFK.",
+                color=get_color()
+            )
+            await message.author.send(embed=embed)
+        
+        # Clear AFK data
+        del afk_data[user_id]
+        save_json(AFK_FILE, afk_data)
+        
+        embed = discord.Embed(
+            title="AFK Removed",
+            description=f"Welcome back! Your AFK status has been removed.",
+            color=get_color()
+        )
+        await message.channel.send(embed=embed, delete_after=5)
+    
+    # Process commands
+    await bot.process_commands(message)
 
-# Tasks
+@bot.event
+async def on_message_delete(message):
+    # Track deleted messages for session channel cleanup
+    pass
+
+# ============== BACKGROUND TASKS ==============
 @tasks.loop(minutes=15)
-async def update_member_count():
-    """Update the member count voice channel every 15 minutes"""
-    guild = bot.get_guild(GUILD_ID)
+async def update_membercount():
+    global guild
+    if not guild:
+        guild = bot.get_guild(GUILD_ID)
     if not guild:
         return
     
-    vc = guild.get_channel(CHANNELS["MEMBER_COUNT_VC"])
+    vc = bot.get_channel(MEMBERCOUNT_VC)
     if not vc:
         return
     
@@ -201,808 +236,830 @@ async def update_member_count():
     
     try:
         await vc.edit(name=f"Members: {member_count}")
-        logger.info(f"Updated member count to {member_count}")
+        logger.info(f"Updated membercount to {member_count}")
     except Exception as e:
-        logger.error(f"Failed to update member count: {e}")
+        logger.error(f"Failed to update membercount: {e}")
 
-# Events
-@bot.event
-async def on_ready():
-    """Bot ready event"""
-    logger.info(f"Bot logged in as {bot.user}")
+@tasks.loop(minutes=1)
+async def check_session_status():
+    """Check session status and handle auto-DM/auto-shutdown"""
+    global session_active, session_start_time, session_starter_id, session_check_task
     
-    # Sync commands
-    await tree.sync(guild=discord.Object(id=GUILD_ID))
-    logger.info("Commands synced")
+    session_data = load_json(SESSION_FILE)
     
-    # Start tasks
-    update_member_count.start()
-    session_reminder_task.start()
-
-    # Set initial session status
-    await update_session_status()
-
-@bot.event
-async def on_member_join(member):
-    """Welcome new members"""
-    guild = member.guild
-    welcome_channel = guild.get_channel(CHANNELS["WELCOME"])
-    
-    if not welcome_channel:
+    if not session_data.get('active', False):
         return
     
-    embed = discord.Embed(color=get_color())
-    embed.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479260063192584273/welcomelarp.png?ex=69ae06ca&is=69acb54a&hm=e3cf31d81d9dee35659908000b6d6ad4c2cc9831e57c719cac8c7a6e8d7bfc85&")
-    
-    await welcome_channel.send(f"{member.mention}", embed=embed)
-
-@bot.event
-async def on_message(message):
-    """Handle messages for AFK system"""
-    # Skip bot messages
-    if message.author.bot:
+    if not session_start_time or not session_starter_id:
         return
     
-    # Check if author is AFK
-    if message.author.id in afk_data:
-        afk_info = afk_data.pop(message.author.id)
-        mentions = mentions_while_afk.pop(message.author.id, [])
-        
-        # Remove AFK prefix from nickname
-        if message.author.nickname and message.author.nickname.startswith("AFK • "):
-            try:
-                await message.author.edit(nickname=message.author.nickname.replace("AFK • ", ""))
-            except:
-                pass
-        
-        # Show who mentioned them while AFK
-        embed = discord.Embed(
-            title="Welcome back!",
-            description=f"You are now back from AFK.",
-            color=get_color()
-        )
-        
-        if mentions:
-            mention_text = ", ".join([str(m) for m in mentions])
-            embed.add_field(name="While you were away, you were mentioned by:", value=mention_text, inline=False)
-        
-        await message.author.send(embed=embed)
+    elapsed = datetime.now() - session_start_time
+    elapsed_minutes = elapsed.total_seconds() / 60
     
-    # Check for AFK mentions
-    for mention in message.mentions:
-        if mention.id in afk_data:
-            afk_info = afk_data[mention.id]
-            if mention.id not in mentions_while_afk:
-                mentions_while_afk[mention.id] = []
-            mentions_while_afk[mention.id].append(message.author)
-            
-            await message.reply(f"{mention.nickname} is currently AFK {afk_info['reason']}")
+    # After 1 hour - DM the starter
+    if elapsed_minutes >= 60 and elapsed_minutes < 120:
+        if not session_data.get('hourly_dm_sent', False):
+            await send_session_status_dm(session_starter_id, 1)
+            session_data['hourly_dm_sent'] = True
+            save_json(SESSION_FILE, session_data)
+    
+    # After 2 hours - DM management and auto-shutdown if no response
+    if elapsed_minutes >= 120:
+        if not session_data.get('final_dm_sent', False):
+            await send_session_status_dm_management()
+            session_data['final_dm_sent'] = True
+            save_json(SESSION_FILE, session_data)
+            # Auto shutdown after 2 hours
+            await shutdown_session_auto()
 
-    await bot.process_commands(message)
-
-async def update_session_status():
-    """Update session status channel name"""
-    guild = bot.get_guild(GUILD_ID)
+async def send_session_status_dm(user_id: int, hour: int):
+    """Send DM to session starter asking about session status"""
+    global guild
     if not guild:
+        guild = bot.get_guild(GUILD_ID)
+    
+    user = guild.get_member(user_id)
+    if not user:
         return
-    
-    session_vc = guild.get_channel(CHANNELS["SESSION_VC_STATUS"])
-    if not session_vc:
-        return
-    
-    if session_data["active"]:
-        await session_vc.edit(name="Sessions: 🟢")
-    else:
-        await session_vc.edit(name="Sessions: 🔴")
-
-async def cleanup_session_channel():
-    """Delete messages in session channel except specific ones"""
-    guild = bot.get_guild(GUILD_ID)
-    channel = guild.get_channel(CHANNELS["SESSION_CHANNEL"])
-    
-    if not channel:
-        return
-    
-    keep_message_id = 1480023088799416451
-    
-    async for message in channel.history(limit=100):
-        if message.id != keep_message_id and not message.pinned:
-            try:
-                await message.delete()
-            except:
-                pass
-
-async def send_session_log(guild, action: str, details: str):
-    """Send session action logs to the session channel"""
-    channel = guild.get_channel(CHANNELS["SESSION_CHANNEL"])
-    if not channel:
-        return
-    
-    embed = discord.Embed(description=f"**{action}**\n{details}", color=get_color())
-    embed.set_footer(text=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    await channel.send(embed=embed)
-
-# Slash Commands
-@tree.command(name="afk", description="Set your AFK status", guild=discord.Object(id=GUILD_ID))
-async def afk_command(interaction: discord.Interaction, *, message: str = "AFK"):
-    """Set AFK status"""
-    user = interaction.user
-    guild = interaction.guild
-    
-    # Store AFK data
-    afk_data[user.id] = {"reason": message, "started_at": datetime.now()}
-    
-    # Add AFK prefix to nickname
-    if user.nickname:
-        if not user.nickname.startswith("AFK • "):
-            try:
-                await user.edit(nickname=f"AFK • {user.nickname}")
-            except:
-                pass
-    else:
-        try:
-            await user.edit(nickname=f"AFK • {user.name}")
-        except:
-            pass
-    
-    embed = discord.Embed(
-        description=f"**{user.nickname}**\n> You are now away from your keyboard [AFK] for {message}.\n> Members will be notified about your status.\n> When you are back to your keyboard, you will be shown all the people that mentioned you, while you were AFK.",
-        color=get_color()
-    )
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@tree.command(name="dmuser", description="DM a specific user", guild=discord.Object(id=GUILD_ID))
-@check_executive_plus()
-async def dmuser_command(interaction: discord.Interaction, user: discord.User, *, message: str):
-    """DM a specific user"""
-    guild = interaction.guild
-    member = guild.get_member(user.id) or user
-    
-    # Create DM embed
-    member_nickname = guild.get_member(interaction.user.id).nickname or interaction.user.name
-    
-    embed = discord.Embed(color=get_color())
-    embed.set_author(name="𝓛𝓐𝓡𝓟 - New Direct Message (DM)", icon_url=guild.icon.url if guild.icon else None)
-    embed.description = f"> From **{member_nickname}**:\n> {message}\n-# Sent at {datetime.now().strftime('%I:%M%p')}"
-    embed.set_footer(text="Los Angeles Roleplay")
-    
-    try:
-        await member.send(embed=embed)
-        await interaction.response.send_message(f"Successfully sent DM to {user.mention}", ephemeral=True)
-        
-        # Log to channel
-        log_to_channel(guild, "DM User", f"Sent to: {user}\nMessage: {message}", interaction.user)
-    except:
-        await interaction.response.send_message(f"Failed to send DM to {user.mention}", ephemeral=True)
-
-@tree.command(name="dmrole", description="DM a specific role", guild=discord.Object(id=GUILD_ID))
-@check_foundation_plus()
-async def dmrole_command(interaction: discord.Interaction, role: discord.Role, *, message: str):
-    """DM all members with a specific role"""
-    guild = interaction.guild
-    member_nickname = interaction.user.nickname or interaction.user.name
-    
-    sent_count = 0
-    failed_count = 0
-    
-    for member in role.members:
-        # Create DM embed
-        embed = discord.Embed(color=get_color())
-        embed.set_author(name="𝓛𝓐𝓟 - New Direct Message (DM)", icon_url=guild.icon.url if guild.icon else None)
-        embed.description = f"> From **{member_nickname}**:\n> {message}\n-# Sent at {datetime.now().strftime('%I:%M%p')}"
-        embed.set_footer(text="Los Angeles Roleplay")
-        
-        try:
-            await member.send(embed=embed)
-            sent_count += 1
-        except:
-            failed_count += 1
-    
-    await interaction.response.send_message(f"DM sent to {sent_count} members. Failed: {failed_count}", ephemeral=True)
-    
-    # Log to channel
-    log_to_channel(guild, "DM Role", f"Role: {role.name}\nSent to: {sent_count} members\nMessage: {message}", interaction.user)
-
-@tree.command(name="warn", description="Warn a member", guild=discord.Object(id=GUILD_ID))
-@check_staff()
-async def warn_command(interaction: discord.Interaction, member: discord.Member, *, reason: str):
-    """Warn a member"""
-    guild = interaction.guild
-    
-    embed = discord.Embed(
-        title="Warning",
-        description=f"You have been warned in Los Angeles Roleplay",
-        color=get_color()
-    )
-    embed.add_field(name="Reason", value=reason, inline=False)
-    embed.add_field(name="Warned by", value=interaction.user.mention, inline=False)
-    
-    try:
-        await member.send(embed=embed)
-    except:
-        pass
-    
-    await interaction.response.send_message(f"Warning sent to {member.mention}", ephemeral=True)
-    
-    # Log
-    log_to_channel(guild, "Warn", f"Member: {member}\nReason: {reason}", interaction.user)
-
-@tree.command(name="kick", description="Kick a member", guild=discord.Object(id=GUILD_ID))
-@check_staff()
-async def kick_command(interaction: discord.Interaction, member: discord.Member, *, reason: str):
-    """Kick a member"""
-    guild = interaction.guild
-    
-    try:
-        await member.kick(reason=f"By: {interaction.user} | Reason: {reason}")
-        await interaction.response.send_message(f"Kicked {member.mention}", ephemeral=True)
-        
-        # Log
-        log_to_channel(guild, "Kick", f"Member: {member}\nReason: {reason}", interaction.user)
-    except Exception as e:
-        await interaction.response.send_message(f"Failed to kick: {e}", ephemeral=True)
-
-@tree.command(name="ban", description="Ban a member", guild=discord.Object(id=GUILD_ID))
-@check_staff()
-async def ban_command(interaction: discord.Interaction, member: discord.Member, *, reason: str):
-    """Ban a member"""
-    guild = interaction.guild
-    
-    try:
-        await member.ban(reason=f"By: {interaction.user} | Reason: {reason}")
-        await interaction.response.send_message(f"Banned {member.mention}", ephemeral=True)
-        
-        # Log
-        log_to_channel(guild, "Ban", f"Member: {member}\nReason: {reason}", interaction.user)
-    except Exception as e:
-        await interaction.response.send_message(f"Failed to ban: {e}", ephemeral=True)
-
-@tree.command(name="timeout", description="Timeout/Mute a member", guild=discord.Object(id=GUILD_ID))
-@check_staff()
-async def timeout_command(interaction: discord.Interaction, member: discord.Member, duration: int, *, reason: str):
-    """Timeout/Mute a member"""
-    guild = interaction.guild
-    
-    until = datetime.now() + timedelta(minutes=duration)
-    
-    try:
-        await member.timeout(until, reason=reason)
-        await interaction.response.send_message(f"Timed out {member.mention} for {duration} minutes", ephemeral=True)
-        
-        # Log
-        log_to_channel(guild, "Timeout", f"Member: {member}\nDuration: {duration} minutes\nReason: {reason}", interaction.user)
-    except Exception as e:
-        await interaction.response.send_message(f"Failed to timeout: {e}", ephemeral=True)
-
-@tree.command(name="sessions", description="Session Management Panel", guild=discord.Object(id=GUILD_ID))
-async def sessions_command(interaction: discord.Interaction):
-    """Session Management Panel"""
-    guild = interaction.guild
-    
-    # Check if command is sent privately
-    is_private = interaction.command.name in ["sessions", "s", "se", "ses", "sess", "sessi", "session", "sessions"] and False  # This is handled by checking option
-    
-    # Check permissions
-    management_role = guild.get_role(ROLES["MANAGEMENT"])
-    exec_role = guild.get_role(ROLES["EXECUTIVE_COUNCIL"])
-    bot_dev_role = guild.get_role(ROLES["BOT_DEV"])
-    
-    member = interaction.user
-    if not (management_role in member.roles or exec_role in member.roles or bot_dev_role in member.roles):
-        embed = discord.Embed(
-            description="Only Management+ staff members of Los Angeles Roleplay are permitted to manage a session. Refrain from using this command again, unless you become Management.",
-            color=get_color()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    
-    # Get session status
-    session_vc = guild.get_channel(CHANNELS["SESSION_VC_STATUS"])
-    is_active = session_data["active"]
-    
-    session_status = "The Session is **currently active**." if is_active else "The Session is **currently inactive**."
-    if session_vc:
-        if "🟢" in session_vc.name:
-            session_status = "The Session is **currently active**."
-        elif "🔴" in session_vc.name:
-            session_status = "The Session is **currently inactive**."
-    
-    # Get ER:LC data
-    erlc_data = get_erlc_data()
-    erlc_staff_role = guild.get_role(ERLC_STAFF_ROLE)
-    staff_count = len([m for m in guild.members if erlc_staff_role in m.roles]) if erlc_staff_role else 0
-    
-    # Build options based on session status
-    options = []
-    if is_active:
-        options = [
-            discord.SelectOption(label="Session Boost", description="Boost the session", emoji="⬆️"),
-            discord.SelectOption(label="Session Shutdown", description="Shutdown the session", emoji="⏹️"),
-            discord.SelectOption(label="Session Full", description="Alert that session is full", emoji="✅")
-        ]
-    else:
-        options = [
-            discord.SelectOption(label="Session Vote", description="Initiate a session vote", emoji="🗳️"),
-            discord.SelectOption(label="Start Session", description="Start a new session", emoji="▶️")
-        ]
-    
-    # Create the session panel
-    view = SessionView(is_active, session_data)
     
     embed = discord.Embed(color=get_color())
     embed.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1480012702364729364/sessionlarp.png?ex=69ae20bd&is=69accf3d&hm=13f0c90d0443f5e92ad69c9fd2202cef84d275e77b66c202feef7c5adc6a2e02&")
     
     embed2 = discord.Embed(
         title="<:Offical_server:1475860128686411837> | Session Management",
-        description=f"Welcome, {interaction.user.mention}. Thanks for opening Los Angeles Roleplay's Session Management panel.\n\n{session_status}\n\n**In-Game Code:** {erlc_data['server_code']}\n**Players:** {erlc_data['players']}/{erlc_data['max_players']}\n**Staff On-Duty:** {staff_count}",
+        description=f"As the session was started by you approximately an hour ago, please answer this question:\n> Is it currently still active?",
         color=get_color()
     )
+    embed2.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
     
-    if is_active:
-        embed2.description += "\n\n> - 1. **Boost** the Session.\n> - 2. **Shutdown** the Session.\n> - 3. **Alert** that the Session is full."
-    else:
-        embed2.description += "\n\n> - 1. Initiate a Session **Vote**.\n> - 2. **Start** a new Session."
-    
-    embed2.set_footer(text="Los Angeles Roleplay", icon_url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
-    
-    # Send embeds
-    await interaction.response.send_message(embeds=[embed, embed2], view=view, ephemeral=True)
+    view = SessionStatusView()
+    await user.send(embeds=[embed, embed2, embed2], view=view)
 
-class SessionView(discord.ui.View):
-    def __init__(self, is_active: bool, session_info: dict):
-        super().__init__(timeout=None)
-        self.is_active = is_active
-        self.session_info = session_info
-        
-        options = []
-        if is_active:
-            options = [
-                discord.SelectOption(label="Session Boost", value="boost", description="Boost the session", emoji="⬆️"),
-                discord.SelectOption(label="Session Shutdown", value="shutdown", description="Shutdown the session", emoji="⏹️"),
-                discord.SelectOption(label="Session Full", value="full", description="Alert that session is full", emoji="✅")
-            ]
-        else:
-            options = [
-                discord.SelectOption(label="Session Vote", value="vote", description="Initiate a session vote", emoji="🗳️"),
-                discord.SelectOption(label="Start Session", value="start", description="Start a new session", emoji="▶️")
-            ]
-        
-        select = discord.ui.Select(placeholder="Select an option...", options=options)
-        select.callback = self.session_callback
-        self.add_item(select)
+async def send_session_status_dm_management():
+    """Send DM to management role about session status"""
+    global guild
+    if not guild:
+        guild = bot.get_guild(GUILD_ID)
     
-    async def session_callback(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        choice = interaction.data.get("values", [None])[0]
-        
-        if choice == "vote":
-            # Show modal for vote threshold
-            modal = VoteThresholdModal()
-            await interaction.response.send_modal(modal)
-        
-        elif choice == "start":
-            # Start session directly
-            await start_session(interaction.user, guild)
-            await interaction.response.send_message("Session started!", ephemeral=True)
-        
-        elif choice == "boost":
-            await send_session_log(guild, "Session Boost", "The session has been boosted!")
-            await interaction.response.send_message("Session boosted!", ephemeral=True)
-        
-        elif choice == "shutdown":
-            # Check 15 minute cooldown
-            if session_data["started_at"]:
-                elapsed = datetime.now() - session_data["started_at"]
-                if elapsed < timedelta(minutes=15):
-                    await interaction.response.send_message("You are not permitted to shutdown a session unless 15 minutes has elapsed after the session started.", ephemeral=True)
-                    return
-            
-            await shutdown_session(interaction.user, guild)
-            await interaction.response.send_message("Session shutdown!", ephemeral=True)
-        
-        elif choice == "full":
-            session_channel = guild.get_channel(CHANNELS["SESSION_CHANNEL"])
-            if session_channel:
-                await session_channel.send("The session has officially become full. Thank you so much for bringing up activity! There may be a queue in Los Angeles Roleplay.")
-            await interaction.response.send_message("Session full message sent!", ephemeral=True)
+    management_role = guild.get_role(ROLE_MANAGEMENT)
+    executive_role = guild.get_role(ROLE_EXECUTIVE)
+    
+    if not management_role:
+        return
+    
+    embed = discord.Embed(color=get_color())
+    embed.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1480012702364729364/sessionlarp.png?ex=69ae20bd&is=69accf3d&hm=13f0c90d0443f5e92ad69c9fd2202cef84d275e77b66c202feef7c5adc6a2e02&")
+    
+    embed2 = discord.Embed(
+        title="<:Offical_server:1475860128686411837> | Session Management",
+        description=f"The session starter has not responded for 1 hour. Please answer:\n> Is the session currently still active?",
+        color=get_color()
+    )
+    embed2.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
+    
+    for member in guild.members:
+        if management_role in member.roles or (executive_role and executive_role in member.roles):
+            try:
+                view = SessionStatusView()
+                await member.send(embeds=[embed, embed2, embed2], view=view)
+            except:
+                pass
 
-class VoteThresholdModal(discord.ui.Modal):
-    def __init__(self):
-        super().__init__(title="Session Vote Threshold")
-        self.vote_count = discord.ui.TextInput(
-            label="How many votes?",
-            placeholder="Enter number of votes needed",
-            required=True
-        )
-        self.add_item(self.vote_count)
+async def shutdown_session_auto():
+    """Auto shutdown session after 2 hours of inactivity"""
+    global session_active, session_start_time, session_starter_id
     
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            threshold = int(self.vote_count.value)
-            guild = interaction.guild
-            
-            # Create vote embed
-            embed = discord.Embed(color=get_color())
-            embed.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1480012702364729364/sessionlarp.png?ex=69ae20bd&is=69accf3d&hm=13f0c90d0443f5e92ad69c9fd2202cef84d275e77b66c202feef7c5adc6a2e02&")
-            
-            embed2 = discord.Embed(
-                title="<:Offical_server:1475860128686411837> | 𝓛𝓐𝓡𝓟 Session Voting",
-                description=f"A session voting has been started by {interaction.user.nickname or interaction.user.name}.\n\n- If you would like the session to start, please react below with {VOTE_EMOJI}. Once the session reaches {threshold}, the session will begin.\n\n- Votes: 0/{threshold}",
-                color=get_color()
-            )
-            embed2.set_footer(text="Los Angeles Roleplay", icon_url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
-            
-            # Send to session channel
-            session_channel = guild.get_channel(CHANNELS["SESSION_CHANNEL"])
-            
-            # Cleanup first
-            await cleanup_session_channel()
-            
-            # Send vote message
-            vote_message = await session_channel.send(embeds=[embed, embed2])
-            await vote_message.add_reaction(VOTE_EMOJI)
-            
-            # Store vote data
-            session_data["vote_threshold"] = threshold
-            session_data["vote_message_id"] = vote_message.id
-            session_data["vote_started_by"] = interaction.user.id
-            
-            # Notify in staff chat
-            staff_channel = guild.get_channel(CHANNELS["STAFF_CHAT"])
-            if staff_channel:
-                session_ping = guild.get_role(ROLES["SESSION_PING"])
-                await staff_channel.send(f"{interaction.user.mention}: The Session Vote has received `0/{VOTE_EMOJI}. Would you like to begin the session?")
-            
-            await interaction.response.send_message("Session vote started!", ephemeral=True)
-            
-        except ValueError:
-            await interaction.response.send_message("Please enter a valid number!", ephemeral=True)
-
-async def start_session(starter: discord.Member, guild: discord.Guild):
-    """Start a session"""
-    session_data["active"] = True
-    session_data["started_at"] = datetime.now()
-    session_data["started_by"] = starter.id
-    session_data["last_reminder"] = datetime.now()
+    session_active = False
+    session_start_time = None
+    session_starter_id = None
     
-    # Update channel name
-    session_vc = guild.get_channel(CHANNELS["SESSION_VC_STATUS"])
-    if session_vc:
-        await session_vc.edit(name="Sessions: 🟢")
+    # Update session status channel
+    status_channel = bot.get_channel(SESSION_STATUS_CHANNEL)
+    if status_channel:
+        await status_channel.edit(name="Sessions: 🔴")
     
-    # Get ER:LC data
-    erlc_data = get_erlc_data()
-    erlc_staff_role = guild.get_role(ERLC_STAFF_ROLE)
-    staff_count = len([m for m in guild.members if erlc_staff_role in m.roles]) if erlc_staff_role else 0
-    
-    # Send session start embed
-    session_channel = guild.get_channel(CHANNELS["SESSION_CHANNEL"])
-    if session_channel:
-        # Cleanup first
-        await cleanup_session_channel()
-        
-        embed = discord.Embed(color=get_color())
-        embed.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1480012702364729364/sessionlarp.png?ex=69ae20bd&is=69accf3d&hm=13f0c90d0443f5e92ad69c9fd2202cef84d275e77b66c202feef7c5adc6a2e02&")
-        
-        embed2 = discord.Embed(
-            title="<:Offical_server:1475860128686411837> | 𝓛𝓐𝓡𝓟 Session Voting",
-            description=f"After the required vote threshold has been received, a session has begun in Los Angeles Roleplay. Please refer below for more information.\n\n**In-Game Code:** {erlc_data['server_code']}\n**Players:** {erlc_data['players']}/{erlc_data['max_players']}\n**Staff On-Duty:** {staff_count}",
-            color=get_color()
-        )
-        embed2.set_footer(text="Los Angeles Roleplay", icon_url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
-        
-        msg = await session_channel.send(embeds=[embed, embed2])
-        session_data["session_message_id"] = msg.id
-    
-    # Save session info to file
-    await save_session_info()
-    
-    # Log
-    log_to_channel(guild, "Session Started", f"Started by: {starter}", starter)
-
-async def shutdown_session(shutdownter: discord.Member, guild: discord.Guild):
-    """Shutdown a session"""
-    session_data["active"] = False
-    session_data["started_at"] = None
-    session_data["started_by"] = None
-    
-    # Update channel name
-    session_vc = guild.get_channel(CHANNELS["SESSION_VC_STATUS"])
-    if session_vc:
-        await session_vc.edit(name="Sessions: 🔴")
+    # Save session data
+    session_data = load_json(SESSION_FILE)
+    session_data['active'] = False
+    session_data['start_time'] = None
+    session_data['starter_id'] = None
+    session_data['hourly_dm_sent'] = False
+    session_data['final_dm_sent'] = False
+    save_json(SESSION_FILE, session_data)
     
     # Send shutdown embed
-    session_channel = guild.get_channel(CHANNELS["SESSION_CHANNEL"])
+    session_channel = bot.get_channel(SESSION_CHANNEL)
     if session_channel:
         embed = discord.Embed(
-            description=f"A session has been shut down by **{shutdownter.nickname or shutdownter.name}**. Thank you for joining today's session. See you soon!",
+            description=f"A session has been shut down automatically due to inactivity. Thank you for joining today's session. See you soon!",
+            color=get_color()
+        )
+        embed.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
+        
+        await session_channel.send(embed=embed)
+
+# ============== VIEW CLASSES ==============
+class SessionStatusView(discord.ui.View):
+    def __init__(self):
+        super().__init__()
+        
+        dropdown = discord.ui.Select(
+            placeholder="Select an option",
+            options=[
+                discord.SelectOption(label="Yes", value="yes"),
+                discord.SelectOption(label="No", value="no")
+            ]
+        )
+        dropdown.callback = self.status_selected
+        self.add_item(dropdown)
+    
+    async def status_selected(self, interaction: discord.Interaction):
+        value = interaction.data['values'][0]
+        
+        if value == "no":
+            # Shutdown session
+            await shutdown_session_by_user(interaction.user)
+            await interaction.response.send_message("Session has been shut down.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Session remains active.", ephemeral=True)
+
+class SessionManagementView(discord.ui.View):
+    def __init__(self, session_active: bool):
+        super().__init__()
+        
+        if session_active:
+            self.add_item(discord.ui.Button(label="Boost Session", style=discord.ButtonStyle.success, custom_id="session_boost"))
+            self.add_item(discord.ui.Button(label="Shutdown Session", style=discord.ButtonStyle.danger, custom_id="session_shutdown"))
+            self.add_item(discord.ui.Button(label="Session Full", style=discord.ButtonStyle.primary, custom_id="session_full"))
+        else:
+            self.add_item(discord.ui.Button(label="Initiate Session Vote", style=discord.ButtonStyle.primary, custom_id="session_vote"))
+            self.add_item(discord.ui.Button(label="Start Session", style=discord.ButtonStyle.success, custom_id="session_start"))
+
+# ============== HELPER FUNCTIONS ==============
+def load_session_data():
+    global session_active, session_start_time, session_starter_id
+    session_data = load_json(SESSION_FILE)
+    session_active = session_data.get('active', False)
+    if session_data.get('start_time'):
+        session_start_time = datetime.fromisoformat(session_data['start_time'])
+    session_starter_id = session_data.get('starter_id')
+
+async def save_session_data(active: bool, starter_id: int = None):
+    global session_active, session_start_time, session_starter_id
+    session_data = load_json(SESSION_FILE)
+    session_data['active'] = active
+    if active:
+        session_start_time = datetime.now()
+        session_starter_id = starter_id
+        session_data['start_time'] = session_start_time.isoformat()
+        session_data['starter_id'] = starter_id
+        session_data['hourly_dm_sent'] = False
+        session_data['final_dm_sent'] = False
+    else:
+        session_start_time = None
+        session_starter_id = None
+        session_data['start_time'] = None
+        session_data['starter_id'] = None
+    save_json(SESSION_FILE, session_data)
+
+async def cleanup_session_channel():
+    """Delete messages in session channel except the pinned start message"""
+    session_channel = bot.get_channel(SESSION_CHANNEL)
+    if not session_channel:
+        return
+    
+    pinned_message = session_channel.get_partial_message(SESSION_START_MESSAGE)
+    
+    async for message in session_channel.history(limit=100):
+        if message.id != SESSION_START_MESSAGE:
+            try:
+                await message.delete()
+            except:
+                pass
+
+async def shutdown_session_by_user(user: discord.Member):
+    """Shutdown session by a user"""
+    global session_active, session_start_time, session_starter_id
+    
+    session_data = load_json(SESSION_FILE)
+    
+    # Check cooldown
+    if session_data.get('start_time'):
+        start_time = datetime.fromisoformat(session_data['start_time'])
+        elapsed = (datetime.now() - start_time).total_seconds() / 60
+        if elapsed < SESSION_SHUTDOWN_COOLDOWN:
+            return False, "You are not permitted to shutdown a session unless 15 minutes has elapsed after the session started."
+    
+    session_active = False
+    session_start_time = None
+    session_starter_id = None
+    
+    # Update session status channel
+    status_channel = bot.get_channel(SESSION_STATUS_CHANNEL)
+    if status_channel:
+        await status_channel.edit(name="Sessions: 🔴")
+    
+    # Save session data
+    await save_session_data(False)
+    
+    # Send shutdown embed
+    session_channel = bot.get_channel(SESSION_CHANNEL)
+    if session_channel:
+        embed = discord.Embed(
+            description=f"A session has been shut down by **{user.display_name}**. Thank you for joining today's session. See you soon!",
             color=get_color()
         )
         embed.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
         
         await session_channel.send(embed=embed)
     
-    # Clear vote data
-    session_data["vote_threshold"] = None
-    session_data["vote_message_id"] = None
+    # Log to session log channel
+    session_log = bot.get_channel(SESSION_LOG_CHANNEL)
+    if session_log:
+        await session_log.send(embed=discord.Embed(
+            title="Session Shutdown",
+            description=f"Session shut down by {user.display_name}",
+            color=get_color()
+        ))
     
-    # Save session info to file
-    await save_session_info()
+    append_log(SESSION_LOG_FILE, f"Session shutdown by {user.display_name} ({user.id})")
     
-    # Log
-    log_to_channel(guild, "Session Shutdown", f"Shutdown by: {shutdownter}", shutdownter)
+    return True, "Session shut down successfully."
 
-async def save_session_info():
-    """Save session info to file for persistence"""
-    guild = bot.get_guild(GUILD_ID)
-    if not guild:
-        return
+# ============== COMMANDS ==============
+
+# --- AFK Command ---
+@bot.command(name="afk")
+async def afk_command(ctx, *, message: str = "AFK"):
+    """Set your AFK status"""
+    user = ctx.author
+    afk_data = load_json(AFK_FILE)
     
-    # Get ER:LC data
-    erlc_data = get_erlc_data()
-    erlc_staff_role = guild.get_role(ERLC_STAFF_ROLE)
-    staff_count = len([m for m in guild.members if erlc_staff_role in m.roles]) if erlc_staff_role else 0
-    
-    session_info = {
-        "active": session_data["active"],
-        "started_at": session_data["started_at"].isoformat() if session_data["started_at"] else None,
-        "started_by": session_data["started_by"],
-        "players": erlc_data["players"],
-        "staff_on_duty": staff_count,
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    # Save to session info channel as embed
-    info_channel = guild.get_channel(CHANNELS["SESSION_INFO"])
-    if info_channel:
-        embed = discord.Embed(title="Session Info", description=f"```json\n{json.dumps(session_info, indent=2)}```", color=get_color())
+    # Add AFK prefix to nickname
+    nickname = user.display_name
+    if not nickname.startswith("AFK • "):
         try:
-            await info_channel.send(embed=embed)
+            await user.edit(nick=f"AFK • {nickname}")
         except:
             pass
+    
+    # Save AFK data
+    afk_data[str(user.id)] = {
+        'name': user.display_name,
+        'message': message,
+        'mentions': []
+    }
+    save_json(AFK_FILE, afk_data)
+    
+    embed = discord.Embed(
+        title=f"**{user.display_name}**",
+        description=f"> You are now away from your keyboard [AFK] for {message}.\n> Members will be notified about your status.\n> When you are back to your keyboard, you will be shown all the people that mentioned you, while you were AFK.",
+        color=get_color()
+    )
+    
+    await ctx.send(embed=embed, delete_after=10)
+    append_log(AFK_LOG_FILE, f"AFK set by {user.display_name} ({user.id}): {message}")
 
-# Session vote reaction handler
+@tree.command(name="afk", description="Set your AFK status")
+async def afk_slash(interaction: discord.Interaction, *, message: str = "AFK"):
+    await interaction.response.defer(ephemeral=True)
+    await afk_command(interaction.user, message=message)
+    await interaction.followup.send("AFK status set!", ephemeral=True)
+
+# --- DM User Command ---
+@bot.command(name="dmuser")
+async def dmuser_command(ctx, user: discord.Member, *, message: str):
+    """DM a specific user (Executive+ only)"""
+    if not is_executive_plus(ctx.author):
+        await ctx.send("❌ You don't have permission to use this command.", delete_after=5)
+        return
+    
+    # Create DM embed
+    embed = discord.Embed(
+        title="<:Offical_server:1475860128686411837> __𝓛𝓐𝓡𝓟 - New Direct Message (DM)__",
+        description=f"> From **{ctx.author.display_name}**:\n> {message}\n-# Sent at {datetime.now().strftime('%I:%M%p')}",
+        color=get_color()
+    )
+    
+    try:
+        await user.send(embed=embed)
+        await ctx.send(f"✅ DM sent to {user.display_name}", delete_after=5)
+        append_log(DM_LOG_FILE, f"DM to {user.display_name} ({user.id}) by {ctx.author.display_name}: {message}")
+    except:
+        await ctx.send(f"❌ Could not DM {user.display_name}", delete_after=5)
+
+@tree.command(name="dmuser", description="DM a specific user (Executive+ only)")
+@app_commands.describe(user="User to DM", message="Message to send")
+async def dmuser_slash(interaction: discord.Interaction, user: discord.Member, message: str):
+    if not is_executive_plus(interaction.user):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    
+    # Create DM embed
+    embed = discord.Embed(
+        title="<:Offical_server:1475860128686411837> __𝓛𝓐𝓡𝓟 - New Direct Message (DM)__",
+        description=f"> From **{interaction.user.display_name}**:\n> {message}\n-# Sent at {datetime.now().strftime('%I:%M%p')}",
+        color=get_color()
+    )
+    
+    try:
+        await user.send(embed=embed)
+        await interaction.response.send_message(f"✅ DM sent to {user.display_name}", ephemeral=True)
+        append_log(DM_LOG_FILE, f"DM to {user.display_name} ({user.id}) by {interaction.user.display_name}: {message}")
+    except:
+        await interaction.response.send_message(f"❌ Could not DM {user.display_name}", ephemeral=True)
+
+# --- DM Role Command ---
+@bot.command(name="dmrole")
+async def dmrole_command(ctx, role: discord.Role, *, message: str):
+    """DM all members of a specific role (Foundation+ only)"""
+    if not is_foundation_plus(ctx.author):
+        await ctx.send("❌ You don't have permission to use this command.", delete_after=5)
+        return
+    
+    # Create DM embed
+    embed = discord.Embed(
+        title="<:Offical_server:1475860128686411837> __𝓛𝓐𝓡𝓟 - New Direct Message (DM)__",
+        description=f"> From **{ctx.author.display_name}**:\n> {message}\n-# Sent at {datetime.now().strftime('%I:%M%p')}",
+        color=get_color()
+    )
+    
+    sent_count = 0
+    failed_count = 0
+    
+    for member in ctx.guild.members:
+        if role in member.roles:
+            try:
+                await member.send(embed=embed)
+                sent_count += 1
+            except:
+                failed_count += 1
+    
+    await ctx.send(f"✅ DM sent to {sent_count} members of {role.name}. Failed: {failed_count}", delete_after=10)
+    append_log(DM_LOG_FILE, f"DM to role {role.name} ({role.id}) by {ctx.author.display_name}: {message}")
+
+@tree.command(name="dmrole", description="DM all members of a role (Foundation+ only)")
+@app_commands.describe(role="Role to DM", message="Message to send")
+async def dmrole_slash(interaction: discord.Interaction, role: discord.Role, message: str):
+    if not is_foundation_plus(interaction.user):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    
+    # Create DM embed
+    embed = discord.Embed(
+        title="<:Offical_server:1475860128686411837> __𝓛𝓐𝓡𝓟 - New Direct Message (DM)__",
+        description=f"> From **{interaction.user.display_name}**:\n> {message}\n-# Sent at {datetime.now().strftime('%I:%M%p')}",
+        color=get_color()
+    )
+    
+    sent_count = 0
+    failed_count = 0
+    
+    for member in interaction.guild.members:
+        if role in member.roles:
+            try:
+                await member.send(embed=embed)
+                sent_count += 1
+            except:
+                failed_count += 1
+    
+    await interaction.response.send_message(f"✅ DM sent to {sent_count} members of {role.name}. Failed: {failed_count}", ephemeral=True)
+    append_log(DM_LOG_FILE, f"DM to role {role.name} ({role.id}) by {interaction.user.display_name}: {message}")
+
+# --- Session Command ---
+@bot.command(name="sessions")
+async def sessions_command(ctx, type: str = "private"):
+    """Open session management panel"""
+    # Check if it's a private session command
+    if type.lower() in ["private", "p", "pri", "priv", "priva", "privat"]:
+        # Check permissions
+        if not is_management_plus(ctx.author):
+            await ctx.send("Only Management+ staff members of Los Angeles Roleplay are permitted to manage a session. Refrain from using this command again, unless you become Management.", delete_after=10)
+            return
+        
+        # Check session status
+        session_data = load_json(SESSION_FILE)
+        session_active = session_data.get('active', False)
+        
+        # Get status from channel name
+        status_channel = bot.get_channel(SESSION_STATUS_CHANNEL)
+        session_active = status_channel and "🟢" in status_channel.name
+        
+        # Create embeds
+        embed1 = discord.Embed(color=get_color())
+        embed1.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1480012702364729364/sessionlarp.png?ex=69ae20bd&is=69accf3d&hm=13f0c90d0443f5e92ad69c9fd2202cef84d275e77b66c202feef7c5adc6a2e02&")
+        
+        status_text = "The Session is **currently active**." if session_active else "The Session is **currently inactive**."
+        
+        options_text = ""
+        if session_active:
+            options_text = "> - 1. **Boost** the Session.\n> - 2. **Shutdown** the Session.\n> - 3. **Alert** that the Session is full."
+        else:
+            options_text = "> - 1. Initiate a Session **Vote**.\n> - 2. **Start** a new Session."
+        
+        embed2 = discord.Embed(
+            title="<:Offical_server:1475860128686411837> | Session Management",
+            description=f"> Welcome, {ctx.author.mention}. Thanks for opening Los Angeles Roleplay's Session Management panel.\n\n{status_text}\n\nPlease click the options below to manage the session further.\n\n{options_text}",
+            color=get_color()
+        )
+        
+        embed3 = discord.Embed(color=get_color())
+        embed3.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
+        
+        # Create view with buttons
+        view = SessionManagementView(session_active)
+        
+        await ctx.send(embeds=[embed1, embed2, embed3], view=view)
+        
+        # Delete user command
+        try:
+            await ctx.message.delete()
+        except:
+            pass
+    else:
+        await ctx.send("Usage: <sessions private", delete_after=5)
+
+@tree.command(name="sessions", description="Open session management panel")
+async def sessions_slash(interaction: discord.Interaction):
+    # Check permissions
+    if not is_management_plus(interaction.user):
+        await interaction.response.send_message(
+            "Only Management+ staff members of Los Angeles Roleplay are permitted to manage a session. Refrain from using this command again, unless you become Management.",
+            ephemeral=True
+        )
+        return
+    
+    # Check session status
+    session_data = load_json(SESSION_FILE)
+    session_active = session_data.get('active', False)
+    
+    # Get status from channel name
+    status_channel = bot.get_channel(SESSION_STATUS_CHANNEL)
+    session_active = status_channel and "🟢" in status_channel.name
+    
+    # Create embeds
+    embed1 = discord.Embed(color=get_color())
+    embed1.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1480012702364729364/sessionlarp.png?ex=69ae20bd&is=69accf3d&hm=13f0c90d0443f5e92ad69c9fd2202cef84d275e77b66c202feef7c5adc6a2e02&")
+    
+    status_text = "The Session is **currently active**." if session_active else "The Session is **currently inactive**."
+    
+    options_text = ""
+    if session_active:
+        options_text = "> - 1. **Boost** the Session.\n> - 2. **Shutdown** the Session.\n> - 3. **Alert** that the Session is full."
+    else:
+        options_text = "> - 1. Initiate a Session **Vote**.\n> - 2. **Start** a new Session."
+    
+    embed2 = discord.Embed(
+        title="<:Offical_server:1475860128686411837> | Session Management",
+        description=f"> Welcome, {interaction.user.mention}. Thanks for opening Los Angeles Roleplay's Session Management panel.\n\n{status_text}\n\nPlease click the options below to manage the session further.\n\n{options_text}",
+        color=get_color()
+    )
+    
+    embed3 = discord.Embed(color=get_color())
+    embed3.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
+    
+    # Create view with buttons
+    view = SessionManagementView(session_active)
+    
+    await interaction.response.send_message(embeds=[embed1, embed2, embed3], view=view)
+
+# --- Session Button Callbacks ---
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    if not interaction.data or not interaction.data.get('custom_id'):
+        return
+    
+    custom_id = interaction.data['custom_id']
+    user = interaction.user
+    
+    # Check permissions for session actions
+    if custom_id.startswith("session_") and not is_management_plus(user):
+        await interaction.response.send_message(
+            "Only Management+ staff members of Los Angeles Roleplay are permitted to manage a session.",
+            ephemeral=True
+        )
+        return
+    
+    if custom_id == "session_boost":
+        await handle_session_boost(interaction, user)
+    elif custom_id == "session_shutdown":
+        await handle_session_shutdown(interaction, user)
+    elif custom_id == "session_full":
+        await handle_session_full(interaction, user)
+    elif custom_id == "session_vote":
+        await handle_session_vote_start(interaction, user)
+    elif custom_id == "session_start":
+        await handle_session_start(interaction, user)
+
+async def handle_session_boost(interaction: discord.Interaction, user: discord.Member):
+    """Handle session boost"""
+    session_channel = bot.get_channel(SESSION_CHANNEL)
+    if not session_channel:
+        return
+    
+    # Cleanup channel
+    await cleanup_session_channel()
+    
+    # Send session low embed
+    embed1 = discord.Embed(color=get_color())
+    embed1.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1480012702364729364/sessionlarp.png?ex=69ae20bd&is=69accf3d&hm=13f0c90d0443f5e92ad69c9fd2202cef84d275e77b66c202feef7c5adc6a2e02&")
+    
+    session_ping = interaction.guild.get_role(SESSION_PING_ROLE).mention if interaction.guild.get_role(SESSION_PING_ROLE) else "@here"
+    
+    embed2 = discord.Embed(
+        description=f"@here, {session_ping}\nThe session is currently running **low** on players. Please join up to ensure that the server can be full!",
+        color=get_color()
+    )
+    embed2.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
+    
+    await session_channel.send(embeds=[embed1, embed2])
+    await interaction.response.send_message("Session has been boosted!", ephemeral=True)
+    
+    append_log(SESSION_LOG_FILE, f"Session boosted by {user.display_name}")
+
+async def handle_session_shutdown(interaction: discord.Interaction, user: discord.Member):
+    """Handle session shutdown"""
+    session_data = load_json(SESSION_FILE)
+    
+    # Check cooldown
+    if session_data.get('start_time'):
+        start_time = datetime.fromisoformat(session_data['start_time'])
+        elapsed = (datetime.now() - start_time).total_seconds() / 60
+        if elapsed < SESSION_SHUTDOWN_COOLDOWN:
+            await interaction.response.send_message(
+                "You are not permitted to shutdown a session unless 15 minutes has elapsed after the session started.",
+                ephemeral=True
+            )
+            return
+    
+    success, message = await shutdown_session_by_user(user)
+    await interaction.response.send_message(message, ephemeral=True)
+
+async def handle_session_full(interaction: discord.Interaction, user: discord.Member):
+    """Handle session full notification"""
+    session_channel = bot.get_channel(SESSION_CHANNEL)
+    if not session_channel:
+        return
+    
+    await session_channel.send("The session has officially become full. Thank you so much for bringing up activity! There may be a queue in Los Angeles Roleplay.")
+    await interaction.response.send_message("Session full notification sent!", ephemeral=True)
+    
+    append_log(SESSION_LOG_FILE, f"Session full notification by {user.display_name}")
+
+async def handle_session_vote_start(interaction: discord.Interaction, user: discord.Member):
+    """Handle session vote start - ask for vote threshold"""
+    await interaction.response.send_modal(SessionVoteModal())
+
+async def handle_session_start(interaction: discord.Interaction, user: discord.Member):
+    """Handle direct session start"""
+    global session_active, session_start_time, session_starter_id
+    
+    # Update session status channel
+    status_channel = bot.get_channel(SESSION_STATUS_CHANNEL)
+    if status_channel:
+        await status_channel.edit(name="Sessions: 🟢")
+    
+    # Save session data
+    await save_session_data(True, user.id)
+    session_active = True
+    session_start_time = datetime.now()
+    session_starter_id = user.id
+    
+    # Send session start embed
+    session_channel = bot.get_channel(SESSION_CHANNEL)
+    if session_channel:
+        # Cleanup channel first
+        await cleanup_session_channel()
+        
+        embed1 = discord.Embed(color=get_color())
+        embed1.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1480012702364729364/sessionlarp.png?ex=69ae20bd&is=69accf3d&hm=13f0c90d0443f5e92ad69c9fd2202cef84d275e77b66c202feef7c5adc6a2e02&")
+        
+        embed2 = discord.Embed(
+            title="<:Offical_server:1475860128686411837> | 𝓛𝓐𝓡𝓟 Session Started",
+            description=f"After a session has begun in Los Angeles Roleplay. Please refer below for more information.\n- In-Game Code: L",
+            color=get_color()
+        )
+        embed2.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
+        
+        session_ping = interaction.guild.get_role(SESSION_PING_ROLE).mention if interaction.guild.get_role(SESSION_PING_ROLE) else ""
+        await session_channel.send(content=session_ping, embeds=[embed1, embed2])
+    
+    # Log to session log channel
+    session_log = bot.get_channel(SESSION_LOG_CHANNEL)
+    if session_log:
+        await session_log.send(embed=discord.Embed(
+            title="Session Started",
+            description=f"Session started by {user.display_name}",
+            color=get_color()
+        ))
+    
+    append_log(SESSION_LOG_FILE, f"Session started by {user.display_name} ({user.id})")
+    
+    await interaction.response.send_message("Session has been started!", ephemeral=True)
+
+# --- Session Vote Modal ---
+class SessionVoteModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Session Vote")
+        
+        self.vote_threshold = discord.ui.TextInput(
+            label="Vote Threshold",
+            placeholder="How many votes needed to start?",
+            style=discord.TextStyle.short,
+            required=True
+        )
+        self.add_item(self.vote_threshold)
+    
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            threshold = int(self.vote_threshold.value)
+        except ValueError:
+            await interaction.response.send_message("Please enter a valid number.", ephemeral=True)
+            return
+        
+        # Start the vote
+        await start_session_vote(interaction, interaction.user, threshold)
+
+async def start_session_vote(interaction: discord.Interaction, user: discord.Member, threshold: int):
+    """Start a session vote"""
+    global vote_threshold, vote_message_id
+    
+    # Send vote to staff chat
+    staff_channel = bot.get_channel(STAFF_CHAT)
+    if staff_channel:
+        await staff_channel.send(
+            f"{user.mention}: The Session Vote has received `✅/0/{threshold}`. Would you like to begin the session?"
+        )
+    
+    # Create vote embed in session channel
+    session_channel = bot.get_channel(SESSION_CHANNEL)
+    if session_channel:
+        # Cleanup channel first
+        await cleanup_session_channel()
+        
+        embed1 = discord.Embed(color=get_color())
+        embed1.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1480012702364729364/sessionlarp.png?ex=69ae20bd&is=69accf3d&hm=13f0c90d0443f5e92ad69c9fd2202cef84d275e77b66c202feef7c5adc6a2e02&")
+        
+        embed2 = discord.Embed(
+            title="<:Offical_server:1475860128686411837> | 𝓛𝓐𝓡𝓟 Session Voting",
+            description=f"> A session voting has been started by {user.display_name}.\n> - If you would like the session to start, please react below with <:Checkmark:1480018743714386070>. Once the session reaches {threshold}, the session will begin.\n> - Votes: 0/{threshold}",
+            color=get_color()
+        )
+        embed2.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
+        
+        session_ping = interaction.guild.get_role(SESSION_PING_ROLE).mention if interaction.guild.get_role(SESSION_PING_ROLE) else ""
+        vote_message = await session_channel.send(content=session_ping, embeds=[embed1, embed2])
+        
+        # Self react with checkmark
+        await vote_message.add_reaction("✅")
+        
+        vote_message_id = vote_message.id
+        vote_threshold = threshold
+        
+        # Store vote data
+        session_data = load_json(SESSION_FILE)
+        session_data['vote_message_id'] = vote_message_id
+        session_data['vote_threshold'] = threshold
+        session_data['vote_initiator'] = user.id
+        session_data['vote_count'] = 0
+        session_data['vote_active'] = True
+        save_json(SESSION_FILE, session_data)
+        
+        append_log(SESSION_LOG_FILE, f"Session vote started by {user.display_name} with threshold {threshold}")
+    
+    await interaction.response.send_message("Session vote has been initiated!", ephemeral=True)
+
+# --- Vote Reaction Handler ---
 @bot.event
 async def on_raw_reaction_add(payload):
-    """Handle vote reactions"""
-    if payload.message_id != session_data.get("vote_message_id"):
+    if payload.message_id != vote_message_id:
         return
     
-    if str(payload.emoji) != VOTE_EMOJI:
+    if str(payload.emoji) != "✅":
         return
     
-    guild = bot.get_guild(payload.guild_id)
-    if not guild:
+    # Get vote data
+    session_data = load_json(SESSION_FILE)
+    if not session_data.get('vote_active', False):
         return
     
-    channel = guild.get_channel(payload.channel_id)
-    message = await channel.fetch_message(payload.message_id)
+    # Get the message
+    channel = bot.get_channel(SESSION_CHANNEL)
+    if not channel:
+        return
     
-    # Count votes (excluding bot)
-    vote_count = 0
-    for reaction in message.reactions:
-        if str(reaction.emoji) == VOTE_EMOJI:
-            async for user in reaction.users():
-                if not user.bot:
-                    vote_count += 1
-            break
+    try:
+        message = await channel.fetch_message(vote_message_id)
+    except:
+        return
     
-    threshold = session_data.get("vote_threshold", 0)
+    # Count reactions (excluding bot's own reaction)
+    vote_count = sum(1 for r in message.reactions if str(r.emoji) == "✅")
+    vote_count -= 1  # Subtract bot's own reaction
     
+    threshold = session_data.get('vote_threshold', 5)
+    
+    # Update vote count
+    session_data['vote_count'] = vote_count
+    save_json(SESSION_FILE, session_data)
+    
+    # Update embed
+    embed2 = discord.Embed(
+        title="<:Offical_server:1475860128686411837> | 𝓛𝓐𝓡𝓟 Session Voting",
+        description=f"> A session voting has been started by <@{session_data.get('vote_initiator')}>.\n> - If you would like the session to start, please react below with <:Checkmark:1480018743714386070>. Once the session reaches {threshold}, the session will begin.\n> - Votes: {vote_count}/{threshold}",
+        color=get_color()
+    )
+    embed2.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
+    
+    await message.edit(embeds=[message.embeds[0], embed2])
+    
+    # Check if threshold reached
     if vote_count >= threshold:
-        # Remove vote reactions
-        for reaction in message.reactions:
-            if str(reaction.emoji) == VOTE_EMOJI:
-                await reaction.clear()
-                break
-        
         # Start the session
-        starter = guild.get_member(payload.user_id)
-        if starter:
-            await start_session(starter, guild)
+        guild = bot.get_guild(GUILD_ID)
+        initiator = guild.get_member(session_data.get('vote_initiator'))
         
-        # Notify in staff chat
-        staff_channel = guild.get_channel(CHANNELS["STAFF_CHAT"])
-        if staff_channel:
-            session_ping = guild.get_role(ROLES["SESSION_PING"])
-            await staff_channel.send(f"{starter.mention if starter else ''}: The Session Vote has received `{VOTE_EMOJI}/{threshold}. Would you like to begin the session?")
+        if initiator:
+            await handle_session_start_from_vote(initiator)
 
 @bot.event
 async def on_raw_reaction_remove(payload):
-    """Handle vote reaction removal"""
-    if payload.message_id != session_data.get("vote_message_id"):
+    if payload.message_id != vote_message_id:
         return
     
-    if str(payload.emoji) != VOTE_EMOJI:
+    if str(payload.emoji) != "✅":
         return
     
-    guild = bot.get_guild(payload.guild_id)
-    if not guild:
+    # Re-add the bot's reaction if it was removed
+    channel = bot.get_channel(SESSION_CHANNEL)
+    if not channel:
         return
     
-    channel = guild.get_channel(payload.channel_id)
-    message = await channel.fetch_message(payload.message_id)
-    
-    # Re-add the reaction if votes dropped
-    vote_count = 0
-    for reaction in message.reactions:
-        if str(reaction.emoji) == VOTE_EMOJI:
-            async for user in reaction.users():
-                if not user.bot:
-                    vote_count += 1
-            break
-    
-    if vote_count == 0:
-        await message.add_reaction(VOTE_EMOJI)
-
-# Background task for session reminders
-@tasks.loop(minutes=60)
-async def session_reminder_task():
-    """Check and send session reminders"""
-    if not session_data["active"] or not session_data["started_at"]:
-        return
-    
-    guild = bot.get_guild(GUILD_ID)
-    if not guild:
-        return
-    
-    started_by_id = session_data.get("started_by")
-    if not started_by_id:
-        return
-    
-    elapsed = datetime.now() - session_data["started_at"]
-    
-    # After 1 hour, ask starter if session is still active
-    if elapsed >= timedelta(hours=1) and elapsed < timedelta(hours=2):
-        if not session_data.get("last_reminder") or (datetime.now() - session_data["last_reminder"]) >= timedelta(hours=1):
-            starter = guild.get_member(started_by_id)
-            if starter:
-                embed = discord.Embed(color=get_color())
-                embed.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1480012702364729364/sessionlarp.png?ex=69ae20bd&is=69accf3d&hm=13f0c90d0443f5e92ad69c9fd2202cef84d275e77b66c202feef7c5adc6a2e02&")
-                
-                embed2 = discord.Embed(
-                    title="<:Offical_server:1475860128686411837> | Session Management",
-                    description="As the session was started by you approximately an hour ago, please answer this question:\n> Is it currently still active?",
-                    color=get_color()
-                )
-                embed2.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
-                
-                view = SessionActiveView()
-                try:
-                    await starter.send(embeds=[embed, embed2], view=view)
-                    session_data["last_reminder"] = datetime.now()
-                except:
-                    pass
-    
-    # After 2 hours, auto shutdown
-    if elapsed >= timedelta(hours=2):
-        exec_role = guild.get_role(ROLES["EXECUTIVE_COUNCIL"])
-        management_role = guild.get_role(ROLES["MANAGEMENT"])
-        
-        # DM exec/management
-        for member in guild.members:
-            if exec_role in member.roles or management_role in member.roles:
-                try:
-                    embed = discord.Embed(
-                        title="Session Auto-Shutdown Warning",
-                        description="The session has been inactive for 2 hours. It will be auto-shutdown unless responded.",
-                        color=get_color()
-                    )
-                    await member.send(embed=embed)
-                except:
-                    pass
-        
-        # Auto shutdown
-        await shutdown_session(guild.me, guild)
-
-class SessionActiveView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        
-        self.add_item(discord.ui.Button(label="Yes", style=discord.ButtonStyle.green, custom_id="session_yes"))
-        self.add_item(discord.ui.Button(label="No", style=discord.ButtonStyle.red, custom_id="session_no"))
-    
-    async def interaction_check(self, interaction: discord.Interaction):
-        return True
-
-@bot.event
-async def on_interaction(interaction: discord.Interaction):
-    """Handle button interactions"""
-    if interaction.data.get("custom_id") == "session_yes":
-        await interaction.response.send_message("Thank you for confirming! The session remains active.", ephemeral=True)
-    
-    elif interaction.data.get("custom_id") == "session_no":
-        guild = interaction.guild
-        if guild:
-            await shutdown_session(interaction.user, guild)
-        await interaction.response.send_message("Session has been shutdown.", ephemeral=True)
-
-# Regular commands (for prefix compatibility)
-@bot.command(name="afk")
-async def prefix_afk(ctx, *, message="AFK"):
-    """Set AFK status via prefix"""
-    await ctx.invoke(afk_command, message=message)
-
-@bot.command(name="dmuser")
-async def prefix_dmuser(ctx, user: discord.User, *, message):
-    """DM a user via prefix"""
-    await ctx.invoke(dmuser_command, user=user, message=message)
-
-@bot.command(name="dmrole")
-async def prefix_dmrole(ctx, role: discord.Role, *, message):
-    """DM a role via prefix"""
-    await ctx.invoke(dmrole_command, role=role, message=message)
-
-@bot.command(name="warn")
-async def prefix_warn(ctx, member: discord.Member, *, reason):
-    """Warn a member via prefix"""
-    await ctx.invoke(warn_command, member=member, reason=reason)
-
-@bot.command(name="kick")
-async def prefix_kick(ctx, member: discord.Member, *, reason):
-    """Kick a member via prefix"""
-    await ctx.invoke(kick_command, member=member, reason=reason)
-
-@bot.command(name="ban")
-async def prefix_ban(ctx, member: discord.Member, *, reason):
-    """Ban a member via prefix"""
-    await ctx.invoke(ban_command, member=member, reason=reason)
-
-@bot.command(name="timeout")
-async def prefix_timeout(ctx, member: discord.Member, duration: int, *, reason):
-    """Timeout a member via prefix"""
-    await ctx.invoke(timeout_command, member=member, duration=duration, reason=reason)
-
-@bot.command(name="sessions")
-async def prefix_sessions(ctx):
-    """Session management via prefix"""
-    await ctx.invoke(sessions_command)
-
-# Run the bot
-if __name__ == "__main__":
     try:
-        # Load environment variables from .env file if it exists
-        from dotenv import load_dotenv
-        load_dotenv()
+        message = await channel.fetch_message(vote_message_id)
+    except:
+        return
+    
+    # Check if bot reaction is still there
+    bot_reacted = any(r.emoji == "✅" and r.me for r in message.reactions)
+    
+    if not bot_reacted:
+        await message.add_reaction("✅")
+
+async def handle_session_start_from_vote(user: discord.Member):
+    """Start session after vote threshold reached"""
+    global session_active, session_start_time, session_starter_id
+    
+    # Update session status channel
+    status_channel = bot.get_channel(SESSION_STATUS_CHANNEL)
+    if status_channel:
+        await status_channel.edit(name="Sessions: 🟢")
+    
+    # Save session data
+    await save_session_data(True, user.id)
+    session_active = True
+    session_start_time = datetime.now()
+    session_starter_id = user.id
+    
+    # Get session data for vote info
+    session_data = load_json(SESSION_FILE)
+    session_data['vote_active'] = False
+    save_json(SESSION_FILE, session_data)
+    
+    # Send session start embed
+    session_channel = bot.get_channel(SESSION_CHANNEL)
+    if session_channel:
+        embed1 = discord.Embed(color=get_color())
+        embed1.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1480012702364729364/sessionlarp.png?ex=69ae20bd&is=69accf3d&hm=13f0c90d0443f5e92ad69c9fd2202cef84d275e77b66c202feef7c5adc6a2e02&")
         
-        # Keep Flask running
-        keep_alive()
+        embed2 = discord.Embed(
+            title="<:Offical_server:1475860128686411837> | 𝓛𝓐𝓡𝓟 Session Voting",
+            description=f"After {session_data.get('vote_threshold', 5)} votes have been received, a session has begun in Los Angeles Roleplay. Please refer below for more information.\n- In-Game Code: L",
+            color=get_color()
+        )
+        embed2.set_image(url="https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png?ex=69ae0a98&is=69acb918&hm=db4ef1355243a7819a118ee42334cf234f8362d362bb73ed3aa1f589f9762d2e&")
         
-        # Get token from environment
-        token = os.environ.get("DISCORD_TOKEN", "")
-        if not token:
-            logger.warning("No Discord token found. Please set DISCORD_TOKEN environment variable.")
-            logger.info("Bot will start but won't connect without a valid token.")
-        
-        if token:
-            import time
-            max_retries = 5
-            retry_delay = 10  # seconds
-            
-            for attempt in range(max_retries):
-                try:
-                    logger.info(f"Attempting to connect to Discord (attempt {attempt + 1}/{max_retries})...")
-                    bot.run(token)
-                    break
-                except Exception as e:
-                    error_str = str(e)
-                    if "429" in error_str or "Too Many Requests" in error_str or "rate limit" in error_str.lower():
-                        logger.warning(f"Rate limited by Discord. Waiting {retry_delay} seconds before retry...")
-                        time.sleep(retry_delay)
-                        retry_delay *= 2  # Exponential backoff
-                    else:
-                        logger.error(f"Error connecting to Discord: {e}")
-                        raise
-            else:
-                logger.error("Max retries exceeded. Bot could not connect.")
-        else:
-            # Keep Flask running anyway
-            import time
-            while True:
-                time.sleep(1)
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        session_ping = session_channel.guild.get_role(SESSION_PING_ROLE).mention if session_channel.guild.get_role(SESSION_PING_ROLE) else ""
+        await session_channel.send(content=session_ping, embeds=[embed1, embed2])
+    
+    # Log to session log channel
+    session_log = bot.get_channel(SESSION_LOG_CHANNEL)
+    if session_log:
+        await session_log.send(embed=discord.Embed(
+            title="Session Started via Vote",
+            description=f"Session started by {user.display_name} after vote threshold reached",
+            color=get_color()
+        ))
+    
+    append_log(SESSION_LOG_FILE, f"Session started via vote by {user.display_name} ({user.id})")
+
+# ============== RUN BOT ==============
+if __name__ == "__main__":
+    # Get token from environment variable
+    TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+    if not TOKEN:
+        logger.error("Please set DISCORD_BOT_TOKEN environment variable")
+        exit(1)
+    
+    bot.run(TOKEN)
 
