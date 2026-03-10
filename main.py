@@ -105,7 +105,6 @@ intents.message_content = True
 intents.presences = True
 
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents, help_command=None)
-tree = app_commands.CommandTree(bot)
 
 # ============== GLOBAL VARIABLES ==============
 session_vote_message = None
@@ -133,7 +132,7 @@ async def on_ready():
     guild = bot.get_guild(GUILD_ID)
     
     # Sync slash commands
-    await tree.sync()
+    await bot.tree.sync()
     logger.info(f"Bot is ready as {bot.user}")
     
     # Start background tasks
@@ -520,7 +519,7 @@ async def afk_command(ctx, *, message: str = "AFK"):
     await ctx.send(embed=embed, delete_after=10)
     append_log(AFK_LOG_FILE, f"AFK set by {user.display_name} ({user.id}): {message}")
 
-@tree.command(name="afk", description="Set your AFK status")
+@bot.tree.command(name="afk", description="Set your AFK status")
 async def afk_slash(interaction: discord.Interaction, *, message: str = "AFK"):
     await interaction.response.defer(ephemeral=True)
     await afk_command(interaction.user, message=message)
@@ -548,7 +547,7 @@ async def dmuser_command(ctx, user: discord.Member, *, message: str):
     except:
         await ctx.send(f"❌ Could not DM {user.display_name}", delete_after=5)
 
-@tree.command(name="dmuser", description="DM a specific user (Executive+ only)")
+@bot.tree.command(name="dmuser", description="DM a specific user (Executive+ only)")
 @app_commands.describe(user="User to DM", message="Message to send")
 async def dmuser_slash(interaction: discord.Interaction, user: discord.Member, message: str):
     if not is_executive_plus(interaction.user):
@@ -598,7 +597,7 @@ async def dmrole_command(ctx, role: discord.Role, *, message: str):
     await ctx.send(f"✅ DM sent to {sent_count} members of {role.name}. Failed: {failed_count}", delete_after=10)
     append_log(DM_LOG_FILE, f"DM to role {role.name} ({role.id}) by {ctx.author.display_name}: {message}")
 
-@tree.command(name="dmrole", description="DM all members of a role (Foundation+ only)")
+@bot.tree.command(name="dmrole", description="DM all members of a role (Foundation+ only)")
 @app_commands.describe(role="Role to DM", message="Message to send")
 async def dmrole_slash(interaction: discord.Interaction, role: discord.Role, message: str):
     if not is_foundation_plus(interaction.user):
@@ -679,7 +678,7 @@ async def sessions_command(ctx, type: str = "private"):
     else:
         await ctx.send("Usage: <sessions private", delete_after=5)
 
-@tree.command(name="sessions", description="Open session management panel")
+@bot.tree.command(name="sessions", description="Open session management panel")
 async def sessions_slash(interaction: discord.Interaction):
     # Check permissions
     if not is_management_plus(interaction.user):
