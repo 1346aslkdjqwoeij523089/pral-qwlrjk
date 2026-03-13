@@ -1,8 +1,8 @@
 import os
 import json
 import asyncio
+import time
 from datetime import datetime
-import aiofiles
 from flask import Flask
 import nextcord
 from nextcord.ext import commands, tasks
@@ -53,6 +53,28 @@ flask_app = Flask(__name__)
 def home():
     return 'Bot alive!'
 
+async def load_json(file):
+    def _load():
+        if not os.path.exists(file) or os.path.getsize(file) == 0:
+            return {}
+        with open(file, 'r') as f:
+            return json.load(f)
+    return await asyncio.to_thread(_load)
+
+async def save_json(file, data):
+    def _save():
+        os.makedirs(os.path.dirname(file) or '.', exist_ok=True)
+        with open(file, 'w') as f:
+            json.dump(data, f)
+    await asyncio.to_thread(_save)
+
+async def log_action(action, user_id):
+    def _log():
+        os.makedirs('logs', exist_ok=True)
+        with open(LOGS_FILE, 'a') as f:
+            f.write(f'{datetime.now()}: user {user_id} {action}\n')
+    await asyncio.to_thread(_log)
+
 class SessionView(View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -70,7 +92,7 @@ class SessionView(View):
     async def boost(self, btn: Button, inter: nextcord.Interaction):
         if not await self.check_status():
             return await inter.response.send_message('Session inactive.', ephemeral=True)
-        await self.action_embed('low', inter.user, 'boost')
+        await self.action_embed('low', inter.user)
         await inter.response.send_message('Boost sent.', ephemeral=True)
 
     @nextcord.ui.button(label='Shutdown', style=nextcord.ButtonStyle.danger)
@@ -89,7 +111,6 @@ class SessionView(View):
         await self.action_embed('full', inter.user)
         await inter.response.send_message('Full sent.', ephemeral=True)
 
-    # Inactive buttons
     @nextcord.ui.button(label='Vote', style=nextcord.ButtonStyle.secondary)
     async def vote(self, btn: Button, inter: nextcord.Interaction):
         modal = VoteModal()
@@ -103,7 +124,7 @@ class SessionView(View):
         await session_start(inter.user)
         await inter.response.send_message('Session started.', ephemeral=True)
 
-    async def action_embed(self, action, user, type_=''):
+    async def action_embed(self, action, user):
         guild = bot.get_guild(guild_id)
         ch = guild.get_channel(channels['session_ch'])
         await delete_except_pinned(ch)
@@ -113,8 +134,13 @@ class SessionView(View):
             await ch.send(embed=embed)
             await channel_name(channels['session_status'], session_emoji['inactive'])
             await save_session({'active': False})
-        # Add boost (low), full logic similar
-        log_action(f'session_{action}', user.id)
+        elif action == 'low':
+            embed = nextcord.Embed(color=COLOR, description=f'**Low player count** - Boost requested by **{user.display_name}**.')
+            await ch.send(embed=embed)
+        elif action == 'full':
+            embed = nextcord.Embed(color=COLOR, description=f'Session is **full**. Alert by **{user.display_name}**.')
+            await ch.send(embed=embed)
+        await log_action(f'session_{action}', user.id)
 
 class VoteModal(Modal):
     def __init__(self):
@@ -129,33 +155,17 @@ class VoteModal(Modal):
         await session_vote(inter.user, thresh)
         await inter.response.send_message('Vote started.', ephemeral=True)
 
-# Helpers
-async def load_json(file):
-    async with aiofiles.open(file, 'r') as f:
-        return json.loads(await f.read()) if await f.stat().st_size else {}
-
-async def save_json(file, data):
-    async with aiofiles.open(file, 'w') as f:
-        await f.write(json.dumps(data))
-
 async def load_afk():
     return await load_json(AFK_FILE) or {}
 
 async def save_afk(data):
-    os.makedirs(DATA_DIR, exist_ok=True)
     await save_json(AFK_FILE, data)
 
 async def load_session():
-    return await load_json(SESSION_FILE) or {'active': False}
+    return await load_json(SESSION_FILE) or {'active': False, 'votes': 0}
 
 async def save_session(data):
-    os.makedirs(DATA_DIR, exist_ok=True)
     await save_json(SESSION_FILE, data)
-
-async def log_action(action, user_id):
-    os.makedirs('logs', exist_ok=True)
-    async with aiofiles.open(LOGS_FILE, 'a') as f:
-        await f.write(f'{datetime.now()}: user {user_id} {action}\\n')
 
 async def channel_name(ch_id, name_suffix):
     guild = bot.get_guild(guild_id)
@@ -164,7 +174,6 @@ async def channel_name(ch_id, name_suffix):
         await ch.edit(name=f"Sessions: {name_suffix}")
 
 async def delete_except_pinned(ch):
-    # Simple: delete last 50 except if msg.id == pinned
     msgs = [msg async for msg in ch.history(limit=50)]
     to_del = [msg for msg in msgs if msg.id != channels['pinned_msg']]
     if to_del:
@@ -172,7 +181,7 @@ async def delete_except_pinned(ch):
 
 async def session_start(user):
     await channel_name(channels['session_status'], session_emoji['active'])
-    data = {'active': True, 'starter': user.id, 'start_time': time.time(), 'cooldown_until': time.time() + 900}  # 15min
+    data = {'active': True, 'starter': user.id, 'start_time': time.time(), 'cooldown_until': time.time() + 900, 'votes': 0}
     await save_session(data)
     guild = bot.get_guild(guild_id)
     ch = guild.get_channel(channels['session_ch'])
@@ -182,38 +191,40 @@ async def session_start(user):
     embed2 = nextcord.Embed(title='__ <:Offical_server:1475860128686411837> | 𝓛𝓐𝓡𝓟 Session__ ', color=COLOR, description=f'<@{channels["session_ping"]}>\\nAfter votes, session begun. In-Game Code: L')
     embed2.set_image(url='https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png')
     await ch.send(embeds=[embed1, embed2])
-    log_action('session_start', user.id)
+    await log_action('session_start', user.id)
     asyncio.create_task(session_dm_loop(user.id))
 
-# Similar for vote, shutdown, low, full, dm_loop
+async def session_vote(user, thresh):
+    data = await load_session()
+    data.setdefault('votes', 0)
+    data['votes'] += 1
+    await save_session(data)
+    guild = bot.get_guild(guild_id)
+    ch = guild.get_channel(channels['session_ch'])
+    embed = nextcord.Embed(color=COLOR, description=f'Vote #{data["votes"]} / {thresh} by **{user.display_name}**.')
+    await ch.send(embed=embed)
+    if data['votes'] >= thresh:
+        await session_start(user)
+    await log_action('session_vote', user.id)
+
+async def session_shutdown():
+    await channel_name(channels['session_status'], session_emoji['inactive'])
+    await save_session({'active': False})
+    guild = bot.get_guild(guild_id)
+    ch = guild.get_channel(channels['session_ch'])
+    embed = nextcord.Embed(color=COLOR, description='Session shut down.')
+    await ch.send(embed=embed)
+    await log_action('session_shutdown', 0)
 
 async def session_dm_loop(starter_id):
-    await asyncio.sleep(3600)  # 1hr
+    await asyncio.sleep(3600)
     user = bot.get_user(starter_id)
     if user:
-        view = View()
-        select = Select(placeholder='Is session active?', options=[
-            nextcord.SelectOption(label='Yes'),
-            nextcord.SelectOption(label='No')
-        ])
-        select.callback = lambda inter: session_shutdown() if inter.data['values'][0] == 'No' else None
-        view.add_item(select)
-        embed1 = nextcord.Embed(color=COLOR).set_image(url='https://cdn.discordapp.com/attachments/1479259996846948483/1480012702364729364/sessionlarp.png')
-        embed2 = nextcord.Embed(title='Session Management', description='Is it still active?', color=COLOR)
-        embed3 = nextcord.Embed(color=COLOR).set_image(url='https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png')
-        await user.send(embeds=[embed1, embed2, embed3], view=view)
-    # Extend for 2hr, role DMs, auto-shutdown
+        embed = nextcord.Embed(title='Session Check', description='Is it still active?', color=COLOR)
+        await user.send(embed=embed)
 
 def has_perm(member, role_list):
     return any(role.id in role_list for role in member.roles)
-
-@bot.event
-async def on_ready():
-    print(f'{bot.user} logged in.')
-    guild = nextcord.Object(id=guild_id)
-    bot.tree.sync(guild=guild)
-    membercount_loop.start()
-    session_check.start()
 
 @tasks.loop(minutes=15)
 async def membercount_loop():
@@ -221,15 +232,24 @@ async def membercount_loop():
     if guild:
         humans = len([m for m in guild.members if not m.bot])
         ch = guild.get_channel(channels['voice_membercount'])
-        if ch and ch.type == nextcord.ChannelType.voice:
+        if ch and isinstance(ch, nextcord.VoiceChannel):
             await ch.edit(name=f'Members: {humans}')
+
+@bot.event
+async def on_ready():
+    print(f'{bot.user} logged in.')
+    guild = nextcord.Object(id=guild_id)
+    bot.tree.sync(guild=guild)
+    membercount_loop.start()
+    # session_check.start()  # Stubbed
 
 @bot.event
 async def on_member_join(member):
     ch = bot.get_channel(channels['welcome'])
-    embed = nextcord.Embed(color=COLOR)
-    embed.set_image(url='https://cdn.discordapp.com/attachments/1479259996846948483/1479260063192584273/welcomelarp.png')
-    await ch.send(f'{member.mention}', embed=embed)
+    if ch:
+        embed = nextcord.Embed(color=COLOR)
+        embed.set_image(url='https://cdn.discordapp.com/attachments/1479259996846948483/1479260063192584273/welcomelarp.png')
+        await ch.send(f'{member.mention}', embed=embed)
 
 @bot.event
 async def on_message(message):
@@ -244,12 +264,11 @@ async def on_message(message):
             afk_data[str(mention.id)]['mentions'].append({'from': message.author.id, 'msg': message.id})
             await save_afk(afk_data)
     if str(message.author.id) in afk_data:
-        # Remove AFK
         del afk_data[str(message.author.id)]
         await save_afk(afk_data)
         guild = message.guild
-        await guild.edit_member(message.author.id, nick=afk_data.get('old_nick', message.author.display_name))
-        # Send mentions list embed
+        old_nick = afk_data.get('old_nick', message.author.display_name)
+        await guild.edit_member(message.author.id, nick=old_nick)
     if message.content.startswith(PREFIX + 'sessions') and any(x in message.content.lower() for x in ['p', 'pr', 'pri', 'priv', 'priva', 'privat']):
         if not has_perm(message.author, mgmt_roles):
             await message.delete()
@@ -266,19 +285,17 @@ async def dm_user(ctx, user: str, *, msg: str):
         return await ctx.send('No perm.', ephemeral=True if ctx.interaction else False)
     try:
         uid = int(user.replace('<@', '').replace('>', ''))
-        user = await bot.fetch_user(uid)
+        user_obj = await bot.fetch_user(uid)
         now = datetime.now().strftime('%I:%M%p')
         embed = nextcord.Embed(title='𝓛𝓐𝓡𝓟 - New DM', color=COLOR)
         embed.add_field(name='From', value=ctx.author.display_name, inline=False)
         embed.add_field(name=msg, value='', inline=False)
         embed.set_footer(text=f'Sent at {now}')
-        await user.send(embed=embed)
+        await user_obj.send(embed=embed)
         await ctx.send('DM sent.', ephemeral=True if ctx.interaction else False)
         await log_action('dmuser', ctx.author.id)
     except:
         await ctx.send('Invalid user.', ephemeral=True if ctx.interaction else False)
-
-# Similar for dmrole, afk, logs (<logs show recent txt lines in embed)
 
 @bot.hybrid_command(name='afk')
 async def afk(ctx, *, reason: str = 'AFK'):
@@ -295,32 +312,31 @@ async def afk(ctx, *, reason: str = 'AFK'):
 @bot.tree.command(name='sessions', guild=nextcord.Object(id=guild_id))
 async def sessions_slash(inter: nextcord.Interaction):
     if not has_perm(inter.user, mgmt_roles):
-        embed = nextcord.Embed(description='Only Management+.')
+        embed = nextcord.Embed(description='Only Management+.', color=0xff0000)
         return await inter.response.send_message(embed=embed, ephemeral=True)
     is_active = await SessionView().check_status()
     embed1 = nextcord.Embed(color=COLOR).set_image(url='https://cdn.discordapp.com/attachments/1479259996846948483/1480012702364729364/sessionlarp.png')
     desc = f'Welcome, {inter.user.mention}.\\n'
     status_ch = bot.get_guild(guild_id).get_channel(channels['session_status'])
-    status_text = '**currently active**' if status_ch.name.endswith('🟢') else '**currently inactive**'
-    desc += f'The Session is {status_text}.'
-    desc += '\\nClick below.'
+    status_text = '**currently active**' if status_ch and status_ch.name.endswith('🟢') else '**currently inactive**'
+    desc += f'The Session is {status_text}.\\nClick below.'
     if is_active:
-        desc += '- 1. **Boost**\\n- 2. **Shutdown**\\n- 3. **Alert** full.'
+        desc += '- **Boost**\\n- **Shutdown**\\n- **Full** alert.'
     else:
-        desc += '- 1. Initiate Vote.\\n- 2. **Start** new.'
+        desc += '- Initiate **Vote**.\\n- **Start** new.'
     embed2 = nextcord.Embed(title='Session Management', description=desc, color=COLOR)
     embed3 = nextcord.Embed(color=COLOR).set_image(url='https://cdn.discordapp.com/attachments/1479259996846948483/1479264148000084051/larpfooter.png')
     view = SessionView()
     await inter.response.send_message(embeds=[embed1, embed2, embed3], view=view, ephemeral=True)
 
-# Add missing impl like session_vote, session_shutdown, logs command, full vote reaction listener (@bot.listen('on_reaction_add')), etc.
-
-# Run
 async def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs('logs', exist_ok=True)
-    await bot.load_extension('jishaku')  # Optional
-    async with flask_app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080))):
+    try:
+        await bot.load_extension('jishaku')
+    except:
+        pass  # Optional
+    async with flask_app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080))) as _:
         await bot.start(TOKEN)
 
 if __name__ == '__main__':
